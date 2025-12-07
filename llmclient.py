@@ -1,16 +1,18 @@
 import asyncio
+import os
 import time
 from typing import Literal, List, Dict, Any, Optional, AsyncIterator
 
-from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI, OpenAI
+from anthropic import AsyncAnthropic, Anthropic
+from google import genai as genai_client
 import google.generativeai as genai
 import dotenv
 dotenv.load_dotenv()
 
 
 
-Provider = Literal["openai", "claude", "gemini"]
+Provider = Literal["openai", "claude", "gemini","deepseek"]
 Message = Dict[str, str]  # {"role": "system"|"user"|"assistant", "content": "..."}
 
 
@@ -807,3 +809,32 @@ class UnifiedChatClient:
                 yield ev
         else:
             raise ValueError(f"Unknown provider: {provider!r}")
+
+    @staticmethod
+    def get_models(provider: str) -> list[str]:
+        """Get list of model names for a given provider.
+        
+        Args:
+            provider: One of 'gemini', 'openai', 'deepseek', 'anthropic'
+        
+        Returns:
+            List of model name strings
+        """
+        match provider.lower():
+            case "gemini":
+                client = genai_client.Client(api_key=dotenv.get_key(".env", "GOOGLE_API_KEY"))
+                return [
+                    m.name for m in client.models.list()
+                    if "generateContent" in m.supported_actions
+                ]
+            case "openai":
+                client = OpenAI(api_key=dotenv.get_key(".env", "OPENAI_API_KEY"))
+                return [x.id for x in client.models.list().data]
+            case "deepseek":
+                client = OpenAI(api_key=dotenv.get_key(".env", "DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+                return [x.id for x in client.models.list().data]
+            case "anthropic":
+                client = Anthropic(api_key=dotenv.get_key(".env", "ANTHROPIC_API_KEY"))
+                return [x.id for x in client.models.list().data]
+            case _:
+                raise ValueError(f"Unknown provider: {provider}. Use 'gemini', 'openai', 'deepseek', or 'anthropic'")
