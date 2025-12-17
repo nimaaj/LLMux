@@ -672,12 +672,10 @@ asyncio.run(combined_tools())
 
 ```python
 import asyncio
-from mcp_client import MCPToolExecutor
+from mcp_client import mcp_executor
 
 async def multi_server():
-    executor = MCPToolExecutor()
-    
-    try:
+    async with mcp_executor() as executor:
         # Connect to multiple servers
         await executor.connect({
             "name": "filesystem",
@@ -686,21 +684,90 @@ async def multi_server():
             "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         })
         
-        await executor.connect({
-            "name": "fetch",
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-fetch"]
-        })
+        # Connect to another server (if available)
+        try:
+            await executor.connect({
+                "name": "fetch",
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-fetch"]
+            })
+        except Exception as e:
+            print(f"Fetch server not available: {e}")
         
+        print(f"Connected servers: {list(executor.connections.keys())}")
         print(f"Total tools: {len(executor.tool_names)}")
+        
+        # Get tools by server
+        fs_tools = executor.get_tools_for_server("filesystem")
+        print(f"Filesystem tools: {[t['function']['name'] for t in fs_tools]}")
         
         # Use tools from any server
         result = await executor.call_tool("list_directory", {"path": "/tmp"})
-        print(result)
-        
-    finally:
-        await executor.disconnect_all()
+        print(result[:200])  # First 200 chars
+    
+    # All connections automatically cleaned up
 
 asyncio.run(multi_server())
 ```
+
+### Manual Tool Execution
+
+```python
+import asyncio
+from mcp_client import mcp_executor
+
+async def manual_tool_calls():
+    async with mcp_executor() as executor:
+        await executor.connect_stdio(
+            name="filesystem",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        )
+        
+        # Execute a single tool
+        result = await executor.call_tool(
+            "list_directory",
+            {"path": "/tmp"}
+        )
+        print("Directory listing:")
+        print(result)
+        
+        # Execute multiple tool calls (like from an LLM response)
+        tool_calls = [
+            {"id": "call_1", "name": "list_directory", "arguments": {"path": "/tmp"}},
+        ]
+        
+        results = await executor.execute_tool_calls(tool_calls)
+        for r in results:
+            print(f"Tool {r['tool_call_id']}: {r['content'][:100]}...")
+
+asyncio.run(manual_tool_calls())
+```
+
+### Working with MCP Resources
+
+```python
+import asyncio
+from mcp_client import mcp_executor
+
+async def mcp_resources():
+    async with mcp_executor() as executor:
+        await executor.connect_stdio(
+            name="filesystem",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        )
+        
+        # List available resources
+        resources = await executor.list_resources()
+        print(f"Found {len(resources)} resources")
+        for r in resources:
+            print(f"  - {r['name']}: {r['uri']}")
+        
+        # Read a resource (if available)
+        if resources:
+            content = await executor.read_resource(resources[0]["uri"])
+            print(f"Content: {content[:100]}...")
+
+asyncio.run(mcp_resources())

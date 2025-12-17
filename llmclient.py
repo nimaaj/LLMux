@@ -1,3 +1,58 @@
+"""
+LLMux - Unified LLM Client Library
+
+This module provides a unified interface for interacting with multiple LLM providers
+(OpenAI, Claude/Anthropic, Gemini, DeepSeek) through a single, consistent API.
+
+Why LLMux?
+----------
+Each LLM provider has its own SDK, message formats, and quirks. LLMux abstracts
+these differences, allowing you to:
+- Switch between providers with a single parameter change
+- Use the same message format across all providers
+- Handle multimodal content (images) uniformly
+- Use tool calling with the same interface
+- Integrate MCP (Model Context Protocol) tools seamlessly
+
+Architecture Overview:
+---------------------
+1. **Message Format**: Uses OpenAI's format as the standard. Messages are
+   automatically converted to each provider's native format.
+   
+2. **Image Handling**: Images can be provided as URLs, local files, or base64.
+   They're automatically converted to each provider's required format.
+   
+3. **Tool Calling**: Uses OpenAI's tool format as the standard. Tools are
+   automatically converted for Claude and Gemini.
+   
+4. **Streaming**: All providers support streaming with a unified event format.
+
+Quick Start:
+-----------
+```python
+from llmclient import UnifiedChatClient
+from rich_llm_printer import RichPrinter
+
+client = UnifiedChatClient()
+printer = RichPrinter()
+
+# Simple chat
+response = await client.chat(
+    provider="openai",
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+printer.print_chat(response)
+
+# Switch to Claude - same interface!
+response = await client.chat(
+    provider="claude",
+    model="claude-sonnet-4-20250514",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+"""
+
 import asyncio
 import base64
 import json
@@ -12,35 +67,74 @@ from anthropic import AsyncAnthropic, Anthropic
 from google import genai as genai_client
 import google.generativeai as genai
 import dotenv
+
+# Load environment variables from .env file for API keys
 dotenv.load_dotenv()
 
 
 # =============================================================================
 # Type Definitions
 # =============================================================================
+# These TypedDicts provide type hints for the data structures used throughout
+# the client. They help with IDE autocompletion and catch type errors.
 
+# Supported LLM providers
 Provider = Literal["openai", "claude", "gemini", "deepseek"]
 
 
 class TextContent(TypedDict, total=False):
-    """Text content part."""
+    """
+    Text content part for multimodal messages.
+    
+    This is used when a message contains multiple content types (text + images).
+    For text-only messages, you can just use a string for content.
+    
+    Example:
+        {"type": "text", "text": "What's in this image?"}
+    """
     type: Literal["text"]
     text: str
 
 
 class ImageUrlDetail(TypedDict, total=False):
-    """Image URL with optional detail level."""
+    """
+    Image URL specification with optional detail level.
+    
+    The 'detail' parameter is OpenAI-specific and controls how the model
+    processes the image:
+    - "auto": Let the model decide
+    - "low": Faster processing, less detail
+    - "high": Slower processing, more detail
+    
+    Example:
+        {"url": "https://example.com/image.jpg", "detail": "high"}
+    """
     url: str
     detail: Literal["auto", "low", "high"]  # OpenAI-specific
 
 
 class ImageContent(TypedDict, total=False):
-    """Image content part (OpenAI format - used as standard)."""
+    """
+    Image content part for multimodal messages (OpenAI format).
+    
+    This format is used as the standard throughout LLMux. Images are
+    automatically converted to provider-specific formats when needed.
+    
+    The URL can be:
+    - HTTP(S) URL: "https://example.com/image.jpg"
+    - Data URI: "data:image/jpeg;base64,/9j/4AAQ..."
+    
+    Example:
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/cat.jpg"}
+        }
+    """
     type: Literal["image_url"]
     image_url: ImageUrlDetail
 
 
-# Content can be a string or list of content parts
+# Content can be a simple string or a list of content parts (text + images)
 ContentPart = Union[TextContent, ImageContent]
 MessageContent = Union[str, List[ContentPart]]
 
@@ -48,36 +142,102 @@ MessageContent = Union[str, List[ContentPart]]
 # =============================================================================
 # Tool Calling Type Definitions
 # =============================================================================
+# These types define the structure for function calling / tool use.
+# We use OpenAI's format as the standard, converting for other providers.
 
 class FunctionParameters(TypedDict, total=False):
-    """JSON Schema for function parameters."""
+    """
+    JSON Schema for function parameters.
+    
+    This follows JSON Schema specification for defining the expected
+    structure of arguments passed to a tool/function.
+    
+    Example:
+        {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City name"},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+            },
+            "required": ["location"]
+        }
+    """
     type: Literal["object"]
     properties: Dict[str, Any]
     required: List[str]
 
 
 class FunctionDefinition(TypedDict, total=False):
-    """Function definition for tools."""
+    """
+    Function definition for tools.
+    
+    Describes what a tool/function does and what parameters it accepts.
+    
+    Example:
+        {
+            "name": "get_weather",
+            "description": "Get the current weather for a location",
+            "parameters": {...}
+        }
+    """
     name: str
     description: str
     parameters: FunctionParameters
 
 
 class Tool(TypedDict):
-    """Tool definition (OpenAI format as standard)."""
+    """
+    Tool definition in OpenAI format.
+    
+    This is the standard format used throughout LLMux. Tools are
+    automatically converted to Claude and Gemini formats when needed.
+    
+    Example:
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a location",
+                "parameters": {...}
+            }
+        }
+    """
     type: Literal["function"]
     function: FunctionDefinition
 
 
 class ToolCall(TypedDict, total=False):
-    """Tool call from LLM response."""
+    """
+    Tool call from an LLM response.
+    
+    When an LLM decides to use a tool, it returns one or more tool calls
+    with this structure. You then execute the tool and send the result back.
+    
+    Example:
+        {
+            "id": "call_abc123",
+            "name": "get_weather",
+            "arguments": {"location": "Paris", "unit": "celsius"}
+        }
+    """
     id: str
     name: str
     arguments: Dict[str, Any]  # Parsed JSON arguments
 
 
 class ToolResult(TypedDict):
-    """Tool result to send back to LLM."""
+    """
+    Tool result to send back to the LLM.
+    
+    After executing a tool, send the result back to the LLM using this format.
+    The tool_call_id must match the id from the original ToolCall.
+    
+    Example:
+        {
+            "tool_call_id": "call_abc123",
+            "content": "The weather in Paris is sunny, 22°C"
+        }
+    """
     tool_call_id: str
     content: str
 
@@ -87,7 +247,34 @@ class ToolResult(TypedDict):
 # =============================================================================
 
 class Message(TypedDict, total=False):
-    """Chat message with optional multimodal content."""
+    """
+    Chat message with optional multimodal content and tool support.
+    
+    This is the main message type used throughout LLMux. It supports:
+    - Text messages (content as string)
+    - Multimodal messages (content as list of text/image parts)
+    - Tool results (role="tool" with tool_call_id)
+    - Assistant messages with tool calls
+    
+    Roles:
+    - "system": System prompt / instructions
+    - "user": User message
+    - "assistant": Model response
+    - "tool": Tool execution result
+    
+    Examples:
+        # Simple text message
+        {"role": "user", "content": "Hello!"}
+        
+        # Multimodal message with image
+        {"role": "user", "content": [
+            {"type": "text", "text": "What's in this image?"},
+            {"type": "image_url", "image_url": {"url": "..."}}
+        ]}
+        
+        # Tool result
+        {"role": "tool", "tool_call_id": "call_123", "content": "Result..."}
+    """
     role: Literal["system", "user", "assistant", "tool"]
     content: MessageContent
     tool_call_id: str  # For tool result messages
@@ -95,6 +282,63 @@ class Message(TypedDict, total=False):
 
 
 class UnifiedChatClient:
+    """
+    Unified client for interacting with multiple LLM providers.
+    
+    This class provides a single interface for OpenAI, Claude (Anthropic),
+    Gemini (Google), and DeepSeek. It handles:
+    
+    - Message format conversion between providers
+    - Image/multimodal content handling
+    - Tool calling with automatic format conversion
+    - Streaming and non-streaming responses
+    - Token usage tracking
+    
+    Provider Configuration:
+    ----------------------
+    API keys are loaded from environment variables (via .env file):
+    - OPENAI_API_KEY: For OpenAI models
+    - ANTHROPIC_API_KEY: For Claude models
+    - GOOGLE_API_KEY: For Gemini models
+    - DEEPSEEK_API_KEY: For DeepSeek models
+    
+    You can also pass API keys directly to the constructor.
+    
+    Example Usage:
+    -------------
+    ```python
+    # Create client (loads API keys from .env)
+    client = UnifiedChatClient()
+    
+    # Non-streaming chat
+    response = await client.chat(
+        provider="openai",
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Hello!"}],
+        temperature=0.7
+    )
+    print(response["text"])
+    
+    # Streaming chat
+    async for event in client.astream(
+        provider="claude",
+        model="claude-sonnet-4-20250514",
+        messages=messages
+    ):
+        if event["type"] == "token":
+            print(event["text"], end="")
+    
+    # With tools
+    response = await client.chat_with_tools(
+        provider="openai",
+        model="gpt-4o",
+        messages=messages,
+        tools=my_tools,
+        tool_handlers=my_handlers
+    )
+    ```
+    """
+    
     def __init__(
         self,
         openai_api_key: Optional[str] = dotenv.get_key(".env", "OPENAI_API_KEY"),
@@ -102,9 +346,35 @@ class UnifiedChatClient:
         gemini_api_key: Optional[str] = dotenv.get_key(".env", "GOOGLE_API_KEY"),
         deepseek_api_key: Optional[str] = dotenv.get_key(".env", "DEEPSEEK_API_KEY"),
     ):
+        """
+        Initialize the UnifiedChatClient with API keys.
+        
+        Args:
+            openai_api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
+            anthropic_api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+            gemini_api_key: Google API key (defaults to GOOGLE_API_KEY env var)
+            deepseek_api_key: DeepSeek API key (defaults to DEEPSEEK_API_KEY env var)
+            
+        Note:
+            API keys are loaded from .env file by default. You only need to pass
+            them explicitly if you want to override the environment variables.
+        """
+        # Initialize provider clients only if API keys are available
+        # This allows using the client with only some providers configured
+        
+        # OpenAI client - used for GPT models
         self.openai = AsyncOpenAI(api_key=openai_api_key) if openai_api_key else None
-        self.deepseek = AsyncOpenAI(api_key=deepseek_api_key,base_url="https://api.deepseek.com") if deepseek_api_key else None
+        
+        # DeepSeek client - uses OpenAI-compatible API with different base URL
+        self.deepseek = AsyncOpenAI(
+            api_key=deepseek_api_key,
+            base_url="https://api.deepseek.com"
+        ) if deepseek_api_key else None
+        
+        # Claude/Anthropic client
         self.claude = AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+        
+        # Gemini client - uses google.generativeai module
         if gemini_api_key:
             genai.configure(api_key=gemini_api_key)
             self.gemini = genai
@@ -114,22 +384,38 @@ class UnifiedChatClient:
     # ==========================================================================
     # Image Helpers (Static/Class Methods)
     # ==========================================================================
+    # These methods help create multimodal messages with images.
+    # Images can come from URLs, local files, or base64 data.
     
     @staticmethod
     def encode_image_file(image_path: Union[str, Path]) -> tuple[str, str]:
         """
         Encode a local image file to base64.
         
+        This method reads an image file from disk and encodes it as base64,
+        which is the format required by most LLM providers for inline images.
+        
         Args:
-            image_path: Path to the image file
+            image_path: Path to the image file (string or Path object)
             
         Returns:
-            Tuple of (base64_data, mime_type)
+            Tuple of (base64_data, mime_type):
+            - base64_data: The image encoded as a base64 string
+            - mime_type: Detected MIME type (e.g., "image/jpeg")
+            
+        Raises:
+            FileNotFoundError: If the image file doesn't exist
+            
+        Example:
+            b64_data, mime_type = client.encode_image_file("./photo.jpg")
+            # b64_data: "/9j/4AAQ..."
+            # mime_type: "image/jpeg"
         """
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"Image file not found: {image_path}")
         
+        # Map file extensions to MIME types
         mime_types = {
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
@@ -140,6 +426,7 @@ class UnifiedChatClient:
         }
         mime_type = mime_types.get(path.suffix.lower(), "image/jpeg")
         
+        # Read and encode the file
         with open(path, "rb") as f:
             b64_data = base64.b64encode(f.read()).decode("utf-8")
         
@@ -148,23 +435,39 @@ class UnifiedChatClient:
     @staticmethod
     async def encode_image_url(url: str) -> tuple[str, str]:
         """
-        Download an image from URL and encode to base64.
+        Download an image from a URL and encode it to base64.
+        
+        This is useful when you want to ensure the image is embedded in the
+        request rather than requiring the LLM provider to fetch it. Some
+        providers have trouble fetching from certain URLs.
         
         Args:
-            url: HTTP(S) URL to the image
+            url: HTTP(S) URL of the image
             
         Returns:
             Tuple of (base64_data, mime_type)
+            
+        Example:
+            b64_data, mime_type = await client.encode_image_url(
+                "https://example.com/cat.jpg"
+            )
         """
+        # Use a browser-like User-Agent to avoid being blocked
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
-            response = await client.get(url)
+        
+        async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as http_client:
+            response = await http_client.get(url)
             response.raise_for_status()
+            
+            # Extract MIME type from Content-Type header
             content_type = response.headers.get("content-type", "image/jpeg")
             mime_type = content_type.split(";")[0].strip()
+            
+            # Encode the image data
             b64_data = base64.b64encode(response.content).decode("utf-8")
+            
         return b64_data, mime_type
 
     @staticmethod
@@ -177,28 +480,46 @@ class UnifiedChatClient:
         """
         Create an image content part from various sources.
         
+        This is the main helper for adding images to messages. It automatically
+        detects the source type and creates the appropriate content structure.
+        
+        Source Types (auto-detected):
+        - Data URI: "data:image/jpeg;base64,..."
+        - HTTP(S) URL: "https://example.com/image.jpg"
+        - Local file path: "./photo.jpg" or "/path/to/image.png"
+        - Raw base64: Requires mime_type parameter
+        
         Args:
-            source: One of:
-                - Local file path (e.g., "./image.jpg")
-                - HTTP(S) URL (e.g., "https://example.com/image.jpg")
-                - Base64 data URI (e.g., "data:image/jpeg;base64,...")
-                - Raw base64 string (requires mime_type)
-            mime_type: MIME type (required for raw base64, auto-detected otherwise)
+            source: Image source (URL, file path, data URI, or base64)
+            mime_type: MIME type (required for raw base64 data)
             detail: Image detail level for OpenAI ("auto", "low", "high")
             
         Returns:
-            ImageContent dict in OpenAI format (standard format)
+            ImageContent dict ready to use in a message
+            
+        Examples:
+            # From URL
+            img = client.create_image_content("https://example.com/cat.jpg")
+            
+            # From local file (auto-encoded to base64)
+            img = client.create_image_content("./photo.jpg")
+            
+            # From base64 with mime type
+            img = client.create_image_content(b64_data, mime_type="image/png")
+            
+            # With detail level (OpenAI only)
+            img = client.create_image_content(url, detail="high")
         """
-        # Already a data URI
+        # Already a data URI - use as-is
         if source.startswith("data:"):
             url = source
-        # HTTP(S) URL - keep as-is for OpenAI, will be converted for others
+        # HTTP(S) URL - keep as-is (will be converted to base64 for some providers)
         elif source.startswith(("http://", "https://")):
             url = source
-        # Raw base64 string (if mime_type provided, assume it's base64)
+        # Raw base64 string (if mime_type provided)
         elif mime_type:
             url = f"data:{mime_type};base64,{source}"
-        # Local file path - check length first to avoid OS errors with long strings
+        # Local file path - check if it exists and encode
         elif len(source) < 260 and Path(source).exists():
             b64_data, detected_mime = UnifiedChatClient.encode_image_file(source)
             url = f"data:{detected_mime};base64,{b64_data}"
@@ -208,6 +529,7 @@ class UnifiedChatClient:
                 "Provide mime_type for raw base64 data."
             )
         
+        # Build the image_url structure
         image_url: ImageUrlDetail = {"url": url}
         if detail:
             image_url["detail"] = detail
@@ -216,7 +538,24 @@ class UnifiedChatClient:
 
     @staticmethod
     def create_text_content(text: str) -> TextContent:
-        """Create a text content part."""
+        """
+        Create a text content part for multimodal messages.
+        
+        This is used when building messages with mixed content (text + images).
+        For text-only messages, you can just use a string directly.
+        
+        Args:
+            text: The text content
+            
+        Returns:
+            TextContent dict
+            
+        Example:
+            content = [
+                client.create_text_content("What's in this image?"),
+                client.create_image_content("./photo.jpg")
+            ]
+        """
         return {"type": "text", "text": text}
 
     @classmethod
@@ -228,29 +567,40 @@ class UnifiedChatClient:
         """
         Create a message with text and/or images.
         
+        This is the recommended way to create multimodal messages. It handles
+        both simple text and complex multimodal content.
+        
         Args:
-            role: Message role ("system", "user", "assistant")
+            role: Message role ("system", "user", or "assistant")
             content: Either:
-                - A string (text-only message)
-                - A list of content parts (text/image dicts or strings)
+                - A string for text-only messages
+                - A list of content parts (text strings and image dicts)
                 
         Returns:
-            Message dict
+            Message dict ready to use in the messages array
             
-        Example:
-            # Text-only
-            client.create_message("user", "Hello!")
+        Examples:
+            # Text-only message
+            msg = client.create_message("user", "Hello!")
             
-            # With image
-            client.create_message("user", [
+            # Multimodal message with text and image
+            msg = client.create_message("user", [
                 "What's in this image?",
                 client.create_image_content("./photo.jpg"),
             ])
+            
+            # Multiple images
+            msg = client.create_message("user", [
+                "Compare these images:",
+                client.create_image_content("./cat.jpg"),
+                client.create_image_content("./dog.jpg"),
+            ])
         """
+        # Simple text content - no transformation needed
         if isinstance(content, str):
             return {"role": role, "content": content}
         
-        # Normalize list content - convert plain strings to TextContent
+        # List content - normalize strings to TextContent dicts
         normalized: List[ContentPart] = []
         for item in content:
             if isinstance(item, str):
@@ -263,6 +613,16 @@ class UnifiedChatClient:
     # ==========================================================================
     # Tool Calling Helpers
     # ==========================================================================
+    # These methods help create and parse tool definitions and tool call results.
+    # Tools allow LLMs to perform actions like calling APIs, querying databases,
+    # or executing code. All tools use OpenAI's format as the standard.
+    #
+    # Tool Calling Flow:
+    # 1. Define tools with create_tool() - describes what functions the LLM can call
+    # 2. Send messages with tools to chat() - LLM may request tool calls
+    # 3. Execute the requested tool calls with your handler functions
+    # 4. Create tool results with create_tool_result() - tells LLM the results
+    # 5. Continue conversation with results - LLM formulates final response
     
     @staticmethod
     def create_tool(
@@ -272,34 +632,50 @@ class UnifiedChatClient:
         required: Optional[List[str]] = None,
     ) -> Tool:
         """
-        Create a tool definition.
+        Create a tool definition for function calling.
+        
+        Tools describe functions that the LLM can call. The LLM doesn't execute
+        the function itself - it returns a request to call it with specific
+        arguments, and your code executes the function.
         
         Args:
-            name: Function name (e.g., "get_weather")
-            description: Description of what the function does
-            parameters: JSON Schema properties for parameters
-            required: List of required parameter names
+            name: Function name (use lowercase_with_underscores by convention)
+            description: Clear description of what the function does and when
+                        to use it. This helps the LLM decide when to call it.
+            parameters: JSON Schema for the function parameters. Each key is
+                       a parameter name, value is its schema (type, description).
+            required: List of required parameter names. Omitted = all optional.
             
         Returns:
-            Tool definition in OpenAI format
+            Tool definition dict in OpenAI format (works with all providers)
             
         Example:
-            tool = client.create_tool(
-                name="get_weather",
-                description="Get the current weather for a location",
-                parameters={
-                    "location": {
-                        "type": "string",
-                        "description": "City name, e.g., 'Paris'"
-                    },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                        "description": "Temperature unit"
-                    }
-                },
-                required=["location"]
-            )
+            >>> tool = client.create_tool(
+            ...     name="get_weather",
+            ...     description="Get the current weather for a location",
+            ...     parameters={
+            ...         "location": {
+            ...             "type": "string",
+            ...             "description": "City name, e.g., 'Paris, France'"
+            ...         },
+            ...         "unit": {
+            ...             "type": "string",
+            ...             "enum": ["celsius", "fahrenheit"],
+            ...             "description": "Temperature unit (default: celsius)"
+            ...         }
+            ...     },
+            ...     required=["location"]
+            ... )
+        
+        Note:
+            The parameters follow JSON Schema specification. Common types:
+            - "string": Text values
+            - "number": Numeric values (int or float)
+            - "boolean": true/false
+            - "array": Lists (use "items" to specify element type)
+            - "object": Nested objects
+            
+            Use "enum" to restrict values to a specific set.
         """
         return {
             "type": "function",
@@ -319,12 +695,26 @@ class UnifiedChatClient:
         """
         Create a tool result message to send back to the LLM.
         
+        After executing a tool call, you need to tell the LLM what the result
+        was. This creates the message with the proper format.
+        
         Args:
-            tool_call_id: ID from the tool call
-            content: Result of executing the tool (string)
+            tool_call_id: The ID from the tool call (tc["id"]). This links
+                         the result to the specific call request.
+            content: The result of executing the tool (must be a string).
+                    For structured data, JSON-encode it.
             
         Returns:
-            Message with role "tool"
+            Message with role "tool" ready to add to messages array
+            
+        Example:
+            >>> # After LLM requests: {"name": "get_weather", "id": "call_123", ...}
+            >>> weather_data = {"temp": 22, "condition": "sunny"}
+            >>> result_msg = client.create_tool_result(
+            ...     tool_call_id="call_123",
+            ...     content=json.dumps(weather_data)
+            ... )
+            >>> messages.append(result_msg)
         """
         return {
             "role": "tool",
@@ -338,14 +728,33 @@ class UnifiedChatClient:
         tool_calls: List[ToolCall],
     ) -> Message:
         """
-        Create an assistant message with tool calls (for conversation history).
+        Create an assistant message with tool calls for conversation history.
+        
+        When manually managing tool calling (auto_execute=False), you need to
+        include the assistant's tool call requests in the message history
+        before adding tool results. This creates that message.
         
         Args:
-            content: Text content from the assistant (can be empty)
-            tool_calls: List of tool calls from the response
+            content: Text content from the assistant (often empty for tool calls)
+            tool_calls: List of tool calls from response["tool_calls"]
             
         Returns:
-            Message with role "assistant" and tool_calls
+            Message with role "assistant" containing the tool_calls
+            
+        Example:
+            >>> response = await client.chat(..., tools=tools)
+            >>> if response.get("tool_calls"):
+            ...     # Save the assistant's request
+            ...     messages.append(client.create_assistant_message_with_tool_calls(
+            ...         response["text"],
+            ...         response["tool_calls"]
+            ...     ))
+            ...     # Execute tools and add results
+            ...     for tc in response["tool_calls"]:
+            ...         result = execute_my_tool(tc["name"], tc["arguments"])
+            ...         messages.append(client.create_tool_result(tc["id"], result))
+            ...     # Continue conversation
+            ...     response = await client.chat(..., messages=messages)
         """
         return {
             "role": "assistant",
@@ -353,16 +762,30 @@ class UnifiedChatClient:
             "tool_calls": tool_calls,
         }
 
+    # --------------------------------------------------------------------------
+    # Internal Tool Parsing Methods
+    # --------------------------------------------------------------------------
+    # These parse tool calls from provider-specific response formats into
+    # our standard ToolCall format.
+    
     @staticmethod
     def _parse_tool_calls_openai(choice) -> List[ToolCall]:
-        """Parse tool calls from OpenAI/DeepSeek response."""
+        """
+        Parse tool calls from OpenAI/DeepSeek response.
+        
+        OpenAI returns tool calls as objects with function.name and 
+        function.arguments (JSON string). We parse the arguments and
+        return a standardized format.
+        """
         import json
         tool_calls = []
         if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
             for tc in choice.message.tool_calls:
                 try:
+                    # Arguments come as JSON string - parse to dict
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
+                    # If parsing fails, preserve the raw string
                     args = {"_raw": tc.function.arguments}
                 tool_calls.append({
                     "id": tc.id,
@@ -373,20 +796,39 @@ class UnifiedChatClient:
 
     @staticmethod
     def _parse_tool_calls_claude(response) -> List[ToolCall]:
-        """Parse tool calls from Claude response."""
+        """
+        Parse tool calls from Claude response.
+        
+        Claude uses "tool_use" content blocks. Unlike OpenAI, the arguments
+        are already parsed as a dict, not a JSON string.
+        """
         tool_calls = []
         for block in response.content:
             if getattr(block, "type", None) == "tool_use":
                 tool_calls.append({
                     "id": block.id,
                     "name": block.name,
-                    "arguments": block.input,
+                    "arguments": block.input,  # Already a dict
                 })
         return tool_calls
 
+    # --------------------------------------------------------------------------
+    # Internal Tool Format Conversion
+    # --------------------------------------------------------------------------
+    # Convert from our standard OpenAI format to provider-specific formats.
+    
     @staticmethod
     def _convert_tools_for_claude(tools: List[Tool]) -> List[Dict[str, Any]]:
-        """Convert OpenAI-format tools to Claude format."""
+        """
+        Convert OpenAI-format tools to Claude format.
+        
+        Claude format:
+        {
+            "name": "...",
+            "description": "...",
+            "input_schema": { JSON Schema }  # Note: "input_schema" not "parameters"
+        }
+        """
         claude_tools = []
         for tool in tools:
             func = tool.get("function", {})
@@ -399,7 +841,14 @@ class UnifiedChatClient:
 
     @staticmethod
     def _convert_tools_for_gemini(tools: List[Tool]) -> List[Dict[str, Any]]:
-        """Convert OpenAI-format tools to Gemini format."""
+        """
+        Convert OpenAI-format tools to Gemini format.
+        
+        Gemini format wraps tools in a "function_declarations" array:
+        [{"function_declarations": [
+            {"name": "...", "description": "...", "parameters": {...}}
+        ]}]
+        """
         function_declarations = []
         for tool in tools:
             func = tool.get("function", {})
@@ -413,10 +862,17 @@ class UnifiedChatClient:
     # ==========================================================================
     # Message Conversion for Each Provider
     # ==========================================================================
+    # Each provider has a different format for messages, especially for:
+    # - System messages (some treat as separate parameter, others as regular message)
+    # - Multimodal content (different image format structures)
+    # - Tool calls and results (different response/request formats)
+    #
+    # These methods convert our standard OpenAI-style format to each provider's
+    # specific requirements. This is where the "unified" magic happens.
     
     @staticmethod
     def _is_multimodal_message(message: Message) -> bool:
-        """Check if a message contains multimodal content."""
+        """Check if a message contains multimodal content (images)."""
         return isinstance(message.get("content"), list)
 
     async def _convert_messages_for_openai(
@@ -426,21 +882,26 @@ class UnifiedChatClient:
         """
         Convert messages to OpenAI format.
         
+        OpenAI's format is our "standard" format, so this is mostly pass-through
+        with some transformations for reliability:
+        
+        1. Tool result messages: Ensures proper structure with tool_call_id
+        2. Assistant messages with tool_calls: Converts arguments back to JSON strings
+        3. Image URLs: Downloads and converts to base64 for reliability
+           (OpenAI's servers sometimes fail to fetch from certain URLs)
+        
         OpenAI natively supports:
         - Text content: {"type": "text", "text": "..."}
         - Image URLs: {"type": "image_url", "image_url": {"url": "..."}}
         - Base64 images: {"type": "image_url", "image_url": {"url": "data:..."}}
         - Tool calls and tool results
-        
-        Note: We convert HTTP URLs to base64 for reliability, as OpenAI's servers
-        may fail to download from certain sources.
         """
         converted = []
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            # Handle tool result messages
+            # Handle tool result messages - pass through with correct structure
             if role == "tool":
                 converted.append({
                     "role": "tool",
@@ -450,6 +911,7 @@ class UnifiedChatClient:
                 continue
             
             # Handle assistant messages with tool_calls
+            # Need to convert arguments dict back to JSON string
             if role == "assistant" and msg.get("tool_calls"):
                 assistant_msg = {
                     "role": "assistant",
@@ -460,6 +922,7 @@ class UnifiedChatClient:
                             "type": "function",
                             "function": {
                                 "name": tc["name"],
+                                # OpenAI expects arguments as JSON string, not dict
                                 "arguments": json.dumps(tc["arguments"]),
                             },
                         }
@@ -469,10 +932,11 @@ class UnifiedChatClient:
                 converted.append(assistant_msg)
                 continue
             
+            # Handle simple text content - no transformation needed
             if isinstance(content, str):
                 converted.append({"role": role, "content": content})
             else:
-                # Process multimodal content
+                # Process multimodal content (text + images)
                 openai_content = []
                 for part in content:
                     if part.get("type") == "text":
@@ -482,6 +946,7 @@ class UnifiedChatClient:
                         detail = part.get("image_url", {}).get("detail")
                         
                         # Convert HTTP URLs to base64 for reliability
+                        # (OpenAI may fail to fetch from some URLs)
                         if url.startswith(("http://", "https://")):
                             b64_data, mime_type = await self.encode_image_url(url)
                             url = f"data:{mime_type};base64,{b64_data}"
@@ -505,18 +970,25 @@ class UnifiedChatClient:
         """
         Convert messages to Claude format and extract system message.
         
-        Claude format for images:
+        Key differences from OpenAI:
+        1. System message is passed as a separate parameter, not in messages array
+        2. Image format is different - uses "source" object with base64 data
+        3. Claude requires base64 for all images (doesn't fetch URLs)
+        
+        Claude image format:
         {
             "type": "image",
             "source": {
                 "type": "base64",
                 "media_type": "image/jpeg",
-                "data": "<base64>"
+                "data": "<base64 string without data: prefix>"
             }
         }
         
         Returns:
-            (system_text, converted_messages)
+            Tuple of (system_text, converted_messages):
+            - system_text: Combined system messages as single string (or None)
+            - converted_messages: Messages in Claude format (without system)
         """
         system_parts = []
         converted = []
@@ -525,7 +997,7 @@ class UnifiedChatClient:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            # Collect system messages
+            # Collect system messages separately - Claude takes system as parameter
             if role == "system":
                 if isinstance(content, str):
                     system_parts.append(content)
@@ -540,6 +1012,7 @@ class UnifiedChatClient:
             if isinstance(content, str):
                 converted.append({"role": role, "content": content})
             else:
+                # Convert multimodal content to Claude format
                 claude_content = []
                 for part in content:
                     if part.get("type") == "text":
@@ -549,35 +1022,21 @@ class UnifiedChatClient:
                         })
                     elif part.get("type") == "image_url":
                         url = part.get("image_url", {}).get("url", "")
-                        
-                        # Convert to Claude format
-                        if url.startswith("data:"):
-                            # Parse data URI
-                            header, b64_data = url.split(",", 1)
-                            media_type = header.split(":")[1].split(";")[0]
-                            claude_content.append({
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": b64_data,
-                                }
-                            })
-                        elif url.startswith(("http://", "https://")):
-                            # Download and convert to base64 for Claude
-                            b64_data, mime_type = await self.encode_image_url(url)
-                            claude_content.append({
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": mime_type,
-                                    "data": b64_data,
-                                }
-                            })
+                        # Claude requires base64 for all images
+                        b64_data, media_type = await self._resolve_image_to_base64(url)
+                        claude_content.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": b64_data,
+                            }
+                        })
                 
                 if claude_content:
                     converted.append({"role": role, "content": claude_content})
         
+        # Combine all system messages into one string
         system_text = "\n\n".join(system_parts) if system_parts else None
         return system_text, converted
 
@@ -588,12 +1047,28 @@ class UnifiedChatClient:
         """
         Convert messages to Gemini format.
         
+        Key differences from OpenAI:
+        1. System instruction is passed to GenerativeModel constructor, not in contents
+        2. Role names differ: "assistant" → "model"
+        3. Image format uses "inline_data" with mime_type and data fields
+        4. Content structure uses "parts" array
+        
         Gemini format:
         - system_instruction: str (passed separately to GenerativeModel)
-        - contents: [{"role": "user"|"model", "parts": [{"text": "..."} | {"inline_data": {...}}]}]
+        - contents: [
+            {
+                "role": "user"|"model",
+                "parts": [
+                    {"text": "..."},
+                    {"inline_data": {"mime_type": "...", "data": "..."}}
+                ]
+            }
+          ]
         
         Returns:
-            (system_instruction, contents)
+            Tuple of (system_instruction, contents):
+            - system_instruction: System message text (or None)
+            - contents: Messages in Gemini format
         """
         system_instruction = None
         contents = []
@@ -602,7 +1077,7 @@ class UnifiedChatClient:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            # Handle system messages
+            # Handle system messages - Gemini takes this as model parameter
             if role == "system":
                 if isinstance(content, str):
                     system_instruction = content
@@ -629,26 +1104,14 @@ class UnifiedChatClient:
                         parts.append({"text": part.get("text", "")})
                     elif part.get("type") == "image_url":
                         url = part.get("image_url", {}).get("url", "")
-                        
-                        if url.startswith("data:"):
-                            # Parse data URI
-                            header, b64_data = url.split(",", 1)
-                            mime_type = header.split(":")[1].split(";")[0]
-                            parts.append({
-                                "inline_data": {
-                                    "mime_type": mime_type,
-                                    "data": b64_data,
-                                }
-                            })
-                        elif url.startswith(("http://", "https://")):
-                            # Download and convert for Gemini
-                            b64_data, mime_type = await self.encode_image_url(url)
-                            parts.append({
-                                "inline_data": {
-                                    "mime_type": mime_type,
-                                    "data": b64_data,
-                                }
-                            })
+                        # Gemini requires inline base64 data
+                        b64_data, mime_type = await self._resolve_image_to_base64(url)
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": b64_data,
+                            }
+                        })
                 
                 if parts:
                     contents.append({"role": gemini_role, "parts": parts})
@@ -656,27 +1119,52 @@ class UnifiedChatClient:
         return system_instruction, contents
 
     # ==========================================================================
-    # Legacy Helper (for backward compatibility)
+    # Helper Methods
     # ==========================================================================
-    
-    @staticmethod
-    def _split_system_messages(messages: List[Message]):
-        """Split system vs non-system messages (legacy helper)."""
-        system_msgs = []
-        other_msgs = []
-        for m in messages:
-            if m["role"] == "system":
-                content = m.get("content", "")
-                if isinstance(content, str):
-                    system_msgs.append(content)
-                else:
-                    # Extract text from multimodal
-                    texts = [p.get("text", "") for p in content if p.get("type") == "text"]
-                    system_msgs.extend(texts)
+
+    async def _execute_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+        tool_handlers: Dict[str, Callable],
+        mcp_executor: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute a single tool call and return the result message.
+        
+        Args:
+            tool_call: Dict with 'id', 'name', 'arguments' keys
+            tool_handlers: Dict mapping tool names to handler functions
+            mcp_executor: Optional MCP executor for MCP tools
+            
+        Returns:
+            Dict with 'role': 'tool', 'tool_call_id', 'content' keys
+        """
+        tool_name = tool_call.get("name", "")
+        arguments = tool_call.get("arguments", {})
+        tool_id = tool_call.get("id", "")
+        
+        try:
+            # Check native handlers first, then MCP
+            if tool_name in tool_handlers:
+                result = tool_handlers[tool_name](arguments)
+                if asyncio.iscoroutine(result):
+                    result = await result
+            elif mcp_executor and tool_name in mcp_executor.tool_names:
+                result = await mcp_executor.call_tool(tool_name, arguments)
             else:
-                other_msgs.append(m)
-        system_text = "\n\n".join(system_msgs) if system_msgs else None
-        return system_text, other_msgs
+                result = f"Error: No handler for tool '{tool_name}'"
+            
+            return {
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "content": str(result),
+            }
+        except Exception as e:
+            return {
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "content": f"Error executing tool '{tool_name}': {str(e)}",
+            }
 
     @staticmethod
     def _normalize_usage(
@@ -687,7 +1175,24 @@ class UnifiedChatClient:
         total_tokens: Optional[int],
         raw: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Return a normalized usage dict with provider-specific raw info."""
+        """
+        Normalize token usage information across providers.
+        
+        Each provider reports token usage differently. This creates a
+        consistent format while preserving the raw provider-specific data.
+        
+        Returns:
+            {
+                "input_tokens": int | None,    # Tokens in the prompt
+                "output_tokens": int | None,   # Tokens in the response
+                "total_tokens": int | None,    # Sum of input + output
+                "raw": {                       # Provider-specific raw data
+                    "provider": "...",
+                    ... original fields ...
+                }
+            }
+        """
+        # Calculate total if not provided
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
 
@@ -701,155 +1206,120 @@ class UnifiedChatClient:
             } if raw is not None else None,
         }
 
-    # --------------------------
-    # Non-streaming provider-specific methods
-    # --------------------------
+    # ==========================================================================
+    # Provider-Specific Chat Methods (Non-Streaming)
+    # ==========================================================================
+    # These are the internal methods that make actual API calls to each provider.
+    # They:
+    # 1. Convert messages to provider-specific format
+    # 2. Make the API call with appropriate parameters
+    # 3. Parse the response (including tool calls if present)
+    # 4. Normalize the response to our standard format
+    #
+    # Users don't call these directly - use chat() instead.
+    
+    async def _openai_compatible_chat(
+        self,
+        client: AsyncOpenAI,
+        provider_name: str,
+        model: str,
+        messages: List[Message],
+        **opts,
+    ) -> Dict[str, Any]:
+        """
+        Shared implementation for OpenAI-compatible APIs (OpenAI, DeepSeek).
+        
+        Both OpenAI and DeepSeek use the same API format, so this method
+        handles both with the provider name as a parameter.
+        """
+        if not client:
+            raise RuntimeError(f"{provider_name.title()} client not configured")
+
+        # Convert messages (handles multimodal content)
+        converted_messages = await self._convert_messages_for_openai(messages)
+
+        # Build request kwargs
+        kwargs = {
+            "model": model,
+            "messages": converted_messages,
+        }
+
+        # Optional params - only include if explicitly set or have non-None defaults
+        optional_params = {
+            "temperature": opts.get("temperature", 0.7),
+            "max_tokens": opts.get("max_tokens", 1024),
+            "top_p": opts.get("top_p"),
+            "frequency_penalty": opts.get("frequency_penalty"),
+            "presence_penalty": opts.get("presence_penalty"),
+            "stop": opts.get("stop"),
+            "seed": opts.get("seed"),
+            "response_format": opts.get("response_format"),
+            "tools": opts.get("tools"),
+            "tool_choice": opts.get("tool_choice"),
+            "user": opts.get("user"),
+        }
+        kwargs.update({k: v for k, v in optional_params.items() if v is not None})
+
+        # Make API call with latency tracking
+        start = time.perf_counter()
+        resp = await client.chat.completions.create(**kwargs)
+        latency_ms = (time.perf_counter() - start) * 1000.0
+
+        choice = resp.choices[0]
+        text = choice.message.content or ""
+        
+        # Parse tool calls if present
+        tool_calls = self._parse_tool_calls_openai(choice)
+
+        # Normalize usage statistics
+        usage = None
+        if resp.usage:
+            usage = self._normalize_usage(
+                provider_name,
+                input_tokens=resp.usage.prompt_tokens,
+                output_tokens=resp.usage.completion_tokens,
+                total_tokens=resp.usage.total_tokens,
+                raw={
+                    "prompt_tokens": resp.usage.prompt_tokens,
+                    "completion_tokens": resp.usage.completion_tokens,
+                    "total_tokens": resp.usage.total_tokens,
+                },
+            )
+
+        # Build standardized response
+        result = {
+            "provider": provider_name,
+            "text": text,
+            "meta": {
+                "model": resp.model,
+                "usage": usage,
+                "latency_ms": latency_ms,
+                "finish_reason": choice.finish_reason,
+            },
+        }
+        
+        if tool_calls:
+            result["tool_calls"] = tool_calls
+            
+        return result
+
     async def _openai_chat(
         self,
         model: str,
         messages: List[Message],
         **opts,
     ) -> Dict[str, Any]:
-        if not self.openai:
-            raise RuntimeError("OpenAI client not configured")
+        """Make a non-streaming chat request to OpenAI."""
+        return await self._openai_compatible_chat(self.openai, "openai", model, messages, **opts)
 
-        # Convert messages for OpenAI (handles multimodal content)
-        converted_messages = await self._convert_messages_for_openai(messages)
-
-        # Required params
-        kwargs = {
-            "model": model,
-            "messages": converted_messages,
-        }
-
-        # Optional params - only include if explicitly set or have non-None defaults
-        optional_params = {
-            "temperature": opts.get("temperature", 0.7),
-            "max_tokens": opts.get("max_tokens", 1024),
-            "top_p": opts.get("top_p"),
-            "frequency_penalty": opts.get("frequency_penalty"),
-            "presence_penalty": opts.get("presence_penalty"),
-            "stop": opts.get("stop"),
-            "seed": opts.get("seed"),
-            "response_format": opts.get("response_format"),
-            "tools": opts.get("tools"),
-            "tool_choice": opts.get("tool_choice"),
-            "user": opts.get("user"),
-        }
-        kwargs.update({k: v for k, v in optional_params.items() if v is not None})
-
-        start = time.perf_counter()
-        resp = await self.openai.chat.completions.create(**kwargs)
-        latency_ms = (time.perf_counter() - start) * 1000.0
-
-        choice = resp.choices[0]
-        text = choice.message.content or ""
-        
-        # Parse tool calls if present
-        tool_calls = self._parse_tool_calls_openai(choice)
-
-        usage = None
-        if resp.usage:
-            usage = self._normalize_usage(
-                "openai",
-                input_tokens=resp.usage.prompt_tokens,
-                output_tokens=resp.usage.completion_tokens,
-                total_tokens=resp.usage.total_tokens,
-                raw={
-                    "prompt_tokens": resp.usage.prompt_tokens,
-                    "completion_tokens": resp.usage.completion_tokens,
-                    "total_tokens": resp.usage.total_tokens,
-                },
-            )
-
-        result = {
-            "provider": "openai",
-            "text": text,
-            "meta": {
-                "model": resp.model,
-                "usage": usage,
-                "latency_ms": latency_ms,
-                "finish_reason": choice.finish_reason,
-            },
-        }
-        
-        if tool_calls:
-            result["tool_calls"] = tool_calls
-            
-        return result
     async def _deepseek_chat(
         self,
         model: str,
         messages: List[Message],
         **opts,
     ) -> Dict[str, Any]:
-        if not self.deepseek:
-            raise RuntimeError("DeepSeek client not configured")
-
-        # Convert messages (DeepSeek uses OpenAI format)
-        converted_messages = await self._convert_messages_for_openai(messages)
-
-        # Required params
-        kwargs = {
-            "model": model,
-            "messages": converted_messages,
-        }
-
-        # Optional params - only include if explicitly set or have non-None defaults
-        optional_params = {
-            "temperature": opts.get("temperature", 0.7),
-            "max_tokens": opts.get("max_tokens", 1024),
-            "top_p": opts.get("top_p"),
-            "frequency_penalty": opts.get("frequency_penalty"),
-            "presence_penalty": opts.get("presence_penalty"),
-            "stop": opts.get("stop"),
-            "seed": opts.get("seed"),
-            "response_format": opts.get("response_format"),
-            "tools": opts.get("tools"),
-            "tool_choice": opts.get("tool_choice"),
-            "user": opts.get("user"),
-        }
-        kwargs.update({k: v for k, v in optional_params.items() if v is not None})
-
-        start = time.perf_counter()
-        resp = await self.deepseek.chat.completions.create(**kwargs)
-        latency_ms = (time.perf_counter() - start) * 1000.0
-
-        choice = resp.choices[0]
-        text = choice.message.content or ""
-        
-        # Parse tool calls if present
-        tool_calls = self._parse_tool_calls_openai(choice)
-
-        usage = None
-        if resp.usage:
-            usage = self._normalize_usage(
-                "deepseek",
-                input_tokens=resp.usage.prompt_tokens,
-                output_tokens=resp.usage.completion_tokens,
-                total_tokens=resp.usage.total_tokens,
-                raw={
-                    "prompt_tokens": resp.usage.prompt_tokens,
-                    "completion_tokens": resp.usage.completion_tokens,
-                    "total_tokens": resp.usage.total_tokens,
-                },
-            )
-
-        result = {
-            "provider": "deepseek",
-            "text": text,
-            "meta": {
-                "model": resp.model,
-                "usage": usage,
-                "latency_ms": latency_ms,
-                "finish_reason": choice.finish_reason,
-            },
-        }
-        
-        if tool_calls:
-            result["tool_calls"] = tool_calls
-            
-        return result
+        """Make a non-streaming chat request to DeepSeek."""
+        return await self._openai_compatible_chat(self.deepseek, "deepseek", model, messages, **opts)
 
     async def _claude_chat(
         self,
@@ -1039,24 +1509,26 @@ class UnifiedChatClient:
     # --------------------------
     # Streaming provider-specific methods
     # --------------------------
-    async def _openai_stream(
+    async def _openai_compatible_stream(
         self,
+        client: AsyncOpenAI,
+        provider_name: str,
         model: str,
         messages: List[Message],
         **opts,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        True streaming for OpenAI.
+        Shared streaming implementation for OpenAI-compatible APIs (OpenAI, DeepSeek).
 
         Yields:
-            {"type": "token", "provider": "openai", "text": "..."}
+            {"type": "token", "provider": "...", "text": "..."}
             ...
-            {"type": "done", "provider": "openai", "text": full_text, "meta": {...}}
+            {"type": "done", "provider": "...", "text": full_text, "meta": {...}}
         """
-        if not self.openai:
-            raise RuntimeError("OpenAI client not configured")
+        if not client:
+            raise RuntimeError(f"{provider_name.title()} client not configured")
 
-        # Convert messages for OpenAI (handles multimodal content)
+        # Convert messages (handles multimodal content)
         converted_messages = await self._convert_messages_for_openai(messages)
 
         temperature = opts.get("temperature", 0.7)
@@ -1064,8 +1536,7 @@ class UnifiedChatClient:
         top_p = opts.get("top_p", None)
 
         start = time.perf_counter()
-        # Async stream of ChatCompletionChunk objects
-        stream = await self.openai.chat.completions.create(
+        stream = await client.chat.completions.create(
             model=model,
             messages=converted_messages,
             temperature=temperature,
@@ -1079,12 +1550,11 @@ class UnifiedChatClient:
 
         async for chunk in stream:
             last_chunk = chunk
-            # Each chunk.choices[0].delta.content may be a list or string
             delta = chunk.choices[0].delta
             content = delta.content
             if not content:
                 continue
-            # The SDK often returns a list of content parts; handle both
+            # Handle both list and string content
             if isinstance(content, list):
                 piece = "".join(part.get("text", "") for part in content if isinstance(part, dict))
             else:
@@ -1094,15 +1564,15 @@ class UnifiedChatClient:
                 full_text += piece
                 yield {
                     "type": "token",
-                    "provider": "openai",
+                    "provider": provider_name,
                     "text": piece,
                 }
 
         latency_ms = (time.perf_counter() - start) * 1000.0
 
+        # Extract usage from final chunk if available
         raw_usage = None
         input_tokens = output_tokens = total_tokens = None
-        # Usage is often only present on the final chunk
         if last_chunk is not None and getattr(last_chunk, "usage", None) is not None:
             u = last_chunk.usage
             raw_usage = {
@@ -1115,7 +1585,7 @@ class UnifiedChatClient:
             total_tokens = u.total_tokens
 
         usage = self._normalize_usage(
-            "openai",
+            provider_name,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
@@ -1130,106 +1600,30 @@ class UnifiedChatClient:
 
         yield {
             "type": "done",
-            "provider": "openai",
+            "provider": provider_name,
             "text": full_text,
             "meta": meta,
         }
 
+    async def _openai_stream(
+        self,
+        model: str,
+        messages: List[Message],
+        **opts,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Streaming for OpenAI."""
+        async for event in self._openai_compatible_stream(self.openai, "openai", model, messages, **opts):
+            yield event
+
     async def _deepseek_stream(
-            self,
-            model: str,
-            messages: List[Message],
-            **opts,
-        ) -> AsyncIterator[Dict[str, Any]]:
-            """
-            True streaming for DeepSeek.
-
-            Yields:
-                {"type": "token", "provider": "deepseek", "text": "..."}
-                ...
-                {"type": "done", "provider": "deepseek", "text": full_text, "meta": {...}}
-            """
-            if not self.deepseek:
-                raise RuntimeError("DeepSeek client not configured")
-
-            # Convert messages (DeepSeek uses OpenAI format)
-            converted_messages = await self._convert_messages_for_openai(messages)
-
-            temperature = opts.get("temperature", 0.7)
-            max_tokens = opts.get("max_tokens", 1024)
-            top_p = opts.get("top_p", None)
-
-            start = time.perf_counter()
-            # Async stream of ChatCompletionChunk objects
-            stream = await self.deepseek.chat.completions.create(
-                model=model,
-                messages=converted_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-                stream=True,
-            )
-
-            full_text = ""
-            last_chunk = None
-
-            async for chunk in stream:
-                last_chunk = chunk
-                # Each chunk.choices[0].delta.content may be a list or string
-                delta = chunk.choices[0].delta
-                content = delta.content
-                if not content:
-                    continue
-                # The SDK often returns a list of content parts; handle both
-                if isinstance(content, list):
-                    piece = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-                else:
-                    piece = str(content)
-
-                if piece:
-                    full_text += piece
-                    yield {
-                        "type": "token",
-                        "provider": "deepseek",
-                        "text": piece,
-                    }
-
-            latency_ms = (time.perf_counter() - start) * 1000.0
-
-            raw_usage = None
-            input_tokens = output_tokens = total_tokens = None
-            # Usage is often only present on the final chunk
-            if last_chunk is not None and getattr(last_chunk, "usage", None) is not None:
-                u = last_chunk.usage
-                raw_usage = {
-                    "prompt_tokens": u.prompt_tokens,
-                    "completion_tokens": u.completion_tokens,
-                    "total_tokens": u.total_tokens,
-                }
-                input_tokens = u.prompt_tokens
-                output_tokens = u.completion_tokens
-                total_tokens = u.total_tokens
-
-            usage = self._normalize_usage(
-                "deepseek",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                total_tokens=total_tokens,
-                raw=raw_usage,
-            )
-
-            meta = {
-                "model": getattr(last_chunk, "model", model) if last_chunk is not None else model,
-                "usage": usage,
-                "latency_ms": latency_ms,
-            }
-
-            yield {
-                "type": "done",
-                "provider": "deepseek",
-                "text": full_text,
-                "meta": meta,
-            }
+        self,
+        model: str,
+        messages: List[Message],
+        **opts,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Streaming for DeepSeek."""
+        async for event in self._openai_compatible_stream(self.deepseek, "deepseek", model, messages, **opts):
+            yield event
 
     async def _claude_stream(
         self,
@@ -1389,10 +1783,14 @@ class UnifiedChatClient:
                 "usage": usage,
                 "latency_ms": latency_ms,
             },
-        }   
-    # --------------------------
-    # Unified public entrypoints
-    # --------------------------
+        }
+
+    # ==========================================================================
+    # Unified Public Entrypoints
+    # ==========================================================================
+    # These are the main methods users should call. They provide a unified
+    # interface that works identically across all providers.
+    
     async def chat(
         self,
         provider: Provider,
@@ -1401,23 +1799,55 @@ class UnifiedChatClient:
         **opts,
     ) -> Dict[str, Any]:
         """
-        Unified non-streaming chat interface.
-
+        Make a non-streaming chat request to any provider.
+        
+        This is the main method for simple chat completions. It automatically
+        handles message format conversion, image encoding, and response
+        normalization for each provider.
+        
+        Args:
+            provider: Which LLM provider to use ("openai", "claude", "gemini", "deepseek")
+            model: Model name (e.g., "gpt-4o", "claude-3-5-sonnet-20241022", "gemini-1.5-flash")
+            messages: Conversation messages in OpenAI format
+            **opts: Provider-specific options:
+                - temperature (float): Randomness, 0.0-1.0 (default: 0.7)
+                - max_tokens (int): Max response tokens (default: 1024)
+                - top_p (float): Nucleus sampling threshold
+                - tools (List[Tool]): Tool definitions for function calling
+                - tool_choice (str): "auto", "none", "required", or specific tool name
+                - stop (List[str]): Stop sequences
+                - seed (int): Random seed for reproducibility (OpenAI/DeepSeek)
+                
         Returns:
             {
-                "provider": "openai" | "claude" | "gemini"| "deepseek",
+                "provider": "openai" | "claude" | "gemini" | "deepseek",
                 "text": "<assistant reply>",
+                "tool_calls": [...] | None,  # If tools were used
                 "meta": {
-                    "model": "<model name>",
+                    "model": "<actual model name>",
                     "usage": {
                         "input_tokens": int | None,
                         "output_tokens": int | None,
                         "total_tokens": int | None,
-                        "raw": { ... provider-specific ... } | None,
+                        "raw": { ... provider-specific ... }
                     },
                     "latency_ms": float,
+                    "finish_reason": "..." | None,
                 },
             }
+            
+        Example:
+            >>> response = await client.chat(
+            ...     provider="openai",
+            ...     model="gpt-4o",
+            ...     messages=[
+            ...         {"role": "system", "content": "You are a helpful assistant."},
+            ...         {"role": "user", "content": "Hello!"}
+            ...     ],
+            ...     temperature=0.5,
+            ...     max_tokens=500,
+            ... )
+            >>> print(response["text"])
         """
         if provider == "openai":
             return await self._openai_chat(model, messages, **opts)
@@ -1438,13 +1868,41 @@ class UnifiedChatClient:
         **opts,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Unified streaming chat interface.
-
-        Yields events of the form:
-            {"type": "token", "provider": "...", "text": "..."}
-            ...
-            {"type": "done", "provider": "...", "text": full_text, "meta": {...}}
+        Make a streaming chat request to any provider.
+        
+        Streaming allows you to display the response as it's generated,
+        providing a better user experience for long responses.
+        
+        Args:
+            provider: Which LLM provider to use ("openai", "claude", "gemini", "deepseek")
+            model: Model name
+            messages: Conversation messages in OpenAI format
+            **opts: Provider-specific options (same as chat())
+            
+        Yields:
+            Token events as they arrive:
+            {"type": "token", "provider": "...", "text": "partial text..."}
+            
+            Final event with complete response and metadata:
+            {"type": "done", "provider": "...", "text": "full response", "meta": {...}}
+            
+        Example:
+            >>> async for event in client.astream(
+            ...     provider="openai",
+            ...     model="gpt-4o",
+            ...     messages=[{"role": "user", "content": "Write a haiku"}],
+            ... ):
+            ...     if event["type"] == "token":
+            ...         print(event["text"], end="", flush=True)  # Stream to console
+            ...     elif event["type"] == "done":
+            ...         print()  # Newline at end
+            ...         print(f"Total tokens: {event['meta']['usage']['total_tokens']}")
+            
+        Note:
+            - Tool calls are NOT supported in streaming mode
+            - Use chat() with tools for function calling
         """
+        # Route to provider-specific streaming implementation
         if provider == "openai":
             async for ev in self._openai_stream(model, messages, **opts):
                 yield ev
@@ -1463,13 +1921,25 @@ class UnifiedChatClient:
 
     @staticmethod
     def get_models(provider: str) -> list[str]:
-        """Get list of model names for a given provider.
+        """
+        Get list of available model names for a given provider.
+        
+        This queries the provider's API to get current model availability.
+        Requires the appropriate API key to be set in environment variables.
         
         Args:
             provider: One of 'gemini', 'openai', 'deepseek', 'anthropic'
         
         Returns:
             List of model name strings
+            
+        Example:
+            >>> models = UnifiedChatClient.get_models("openai")
+            >>> print(models)
+            ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', ...]
+            
+        Note:
+            For Gemini, only models that support 'generateContent' are returned.
         """
         match provider.lower():
             case "gemini":
@@ -1493,6 +1963,15 @@ class UnifiedChatClient:
     # ==========================================================================
     # MCP Integration Methods
     # ==========================================================================
+    # These methods provide high-level integration with the Model Context Protocol
+    # (MCP). They allow combining native tool definitions with MCP tools from
+    # connected servers, with automatic tool execution loop handling.
+    #
+    # The key advantage of these methods over manual tool handling:
+    # 1. Automatic tool execution - no manual call/result loop
+    # 2. Seamless MCP integration - MCP tools work like native tools
+    # 3. Multi-iteration support - handles chains of tool calls
+    # 4. Unified interface - same API for native and MCP tools
     
     async def chat_with_tools(
         self,
@@ -1509,25 +1988,40 @@ class UnifiedChatClient:
         """
         Chat with automatic tool execution support.
         
-        This method provides a higher-level interface that:
-        1. Combines native tools with MCP tools
-        2. Automatically executes tool calls (if auto_execute=True)
-        3. Continues the conversation until completion
+        This is the recommended method for function calling and MCP integration.
+        It handles the entire tool call/result loop automatically, allowing the
+        LLM to make multiple tool calls before returning the final response.
+        
+        How it works:
+        1. Sends messages + tool definitions to the LLM
+        2. If LLM requests tool calls, executes them automatically
+        3. Sends results back to LLM
+        4. Repeats until LLM provides a final response (no more tool calls)
         
         Args:
-            provider: LLM provider
+            provider: LLM provider ("openai", "claude", "gemini", "deepseek")
             model: Model name
-            messages: Conversation messages
-            tools: Native tool definitions (OpenAI format)
-            mcp_executor: MCPToolExecutor instance for MCP tools
-            tool_handlers: Dict mapping tool names to handler functions
-                          for native tools. Signature: (arguments: dict) -> str
-            auto_execute: Whether to automatically execute tools
-            max_iterations: Maximum tool execution iterations
-            **opts: Additional options for chat()
+            messages: Conversation messages in OpenAI format
+            tools: Native tool definitions (created with create_tool())
+            mcp_executor: MCPToolExecutor instance with connected MCP servers.
+                         Tools from all connected servers are automatically available.
+            tool_handlers: Dict mapping tool names to handler functions for native
+                          tools. Functions receive (arguments: dict) and return str.
+                          Can be sync or async functions.
+            auto_execute: If True (default), automatically execute tool calls and
+                         continue conversation. If False, return on first tool call
+                         for manual handling.
+            max_iterations: Safety limit on tool execution iterations (default: 10)
+            **opts: Additional options passed to chat() (temperature, max_tokens, etc.)
             
         Returns:
-            Final response with "text", "meta", and optional "tool_history"
+            Final response dict with:
+            - "provider": Provider name
+            - "text": Final assistant response text
+            - "tool_calls": List of tool calls (only if auto_execute=False)
+            - "tool_history": List of all tool executions (name, arguments, result)
+            - "meta": Model info, usage, latency
+            - "warning": Set if max_iterations reached
             
         Example:
             >>> # With native tools
@@ -1585,47 +2079,17 @@ class UnifiedChatClient:
                 response["tool_history"] = tool_history
                 return response
             
-            # Execute tool calls
+            # Execute tool calls using shared helper
             tool_results = []
             for tc in tool_calls:
-                tool_name = tc.get("name", "")
-                arguments = tc.get("arguments", {})
-                tool_id = tc.get("id", "")
-                
-                try:
-                    # Check native handlers first
-                    if tool_name in tool_handlers:
-                        result = tool_handlers[tool_name](arguments)
-                        if asyncio.iscoroutine(result):
-                            result = await result
-                    # Then check MCP executor
-                    elif mcp_executor and tool_name in mcp_executor.tool_names:
-                        result = await mcp_executor.call_tool(tool_name, arguments)
-                    else:
-                        result = f"Error: No handler for tool '{tool_name}'"
-                    
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "content": str(result),
-                    })
-                    tool_history.append({
-                        "tool": tool_name,
-                        "arguments": arguments,
-                        "result": str(result),
-                    })
-                except Exception as e:
-                    error_msg = f"Error executing tool '{tool_name}': {str(e)}"
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "content": error_msg,
-                    })
-                    tool_history.append({
-                        "tool": tool_name,
-                        "arguments": arguments,
-                        "error": str(e),
-                    })
+                result_msg = await self._execute_tool_call(tc, tool_handlers, mcp_executor)
+                tool_results.append(result_msg)
+                # Track history
+                tool_history.append({
+                    "tool": tc.get("name", ""),
+                    "arguments": tc.get("arguments", {}),
+                    "result": result_msg["content"],
+                })
             
             # Add assistant message with tool calls and tool results
             assistant_msg = self.create_assistant_message_with_tool_calls(
@@ -1655,13 +2119,47 @@ class UnifiedChatClient:
         """
         Stream chat with automatic tool execution support.
         
-        Similar to chat_with_tools but yields streaming events.
+        This combines streaming output with automatic tool execution, yielding
+        events for both text tokens and tool execution progress.
         
-        Yields events of the form:
-            {"type": "token", "provider": "...", "text": "..."}
-            {"type": "tool_call", "provider": "...", "tool_calls": [...]}
-            {"type": "tool_result", "provider": "...", "results": [...]}
-            {"type": "done", "provider": "...", "text": full_text, "meta": {...}}
+        Event Flow:
+        1. Token events as response streams in
+        2. tool_call event when LLM requests tools
+        3. tool_result event after tools execute
+        4. Repeat until done event with final response
+        
+        Args:
+            (Same as chat_with_tools)
+            
+        Yields:
+            Token events (streamed response text):
+            {"type": "token", "provider": "...", "text": "partial..."}
+            
+            Tool call events (when LLM requests tools):
+            {"type": "tool_call", "provider": "...", "tool_calls": [{"name": "...", "arguments": {...}}]}
+            
+            Tool result events (after execution):
+            {"type": "tool_result", "provider": "...", "results": [{"tool_call_id": "...", "content": "..."}]}
+            
+            Final done event:
+            {"type": "done", "provider": "...", "text": "full response", "meta": {...}}
+            
+        Example:
+            >>> async for event in client.astream_with_tools(
+            ...     provider="openai",
+            ...     model="gpt-4o",
+            ...     messages=[{"role": "user", "content": "Get the weather in Paris"}],
+            ...     tools=tools,
+            ...     tool_handlers=handlers,
+            ... ):
+            ...     if event["type"] == "token":
+            ...         print(event["text"], end="", flush=True)
+            ...     elif event["type"] == "tool_call":
+            ...         print(f"\\n[Calling tools: {[tc['name'] for tc in event['tool_calls']]}]")
+            ...     elif event["type"] == "tool_result":
+            ...         print(f"[Got {len(event['results'])} results]")
+            ...     elif event["type"] == "done":
+            ...         print(f"\\n[Done]")
         """
         # Combine native tools with MCP tools
         all_tools = list(tools) if tools else []
@@ -1674,6 +2172,7 @@ class UnifiedChatClient:
         tool_handlers = tool_handlers or {}
         working_messages = list(messages)
         
+        # Tool execution loop - continues until LLM stops requesting tools
         for iteration in range(max_iterations):
             # Stream the response
             full_text = ""
@@ -1694,48 +2193,26 @@ class UnifiedChatClient:
                     final_event = event
                     tool_calls = event.get("tool_calls", [])
             
+            # No tool calls or auto-execute disabled - we're done
             if not tool_calls or not auto_execute:
                 if final_event:
                     yield final_event
                 return
             
-            # Yield tool call event
+            # Yield tool call event so caller can track progress
             yield {
                 "type": "tool_call",
                 "provider": provider,
                 "tool_calls": tool_calls,
             }
             
-            # Execute tool calls
+            # Execute tool calls using shared helper
             tool_results = []
             for tc in tool_calls:
-                tool_name = tc.get("name", "")
-                arguments = tc.get("arguments", {})
-                tool_id = tc.get("id", "")
-                
-                try:
-                    if tool_name in tool_handlers:
-                        result = tool_handlers[tool_name](arguments)
-                        if asyncio.iscoroutine(result):
-                            result = await result
-                    elif mcp_executor and tool_name in mcp_executor.tool_names:
-                        result = await mcp_executor.call_tool(tool_name, arguments)
-                    else:
-                        result = f"Error: No handler for tool '{tool_name}'"
-                    
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "content": str(result),
-                    })
-                except Exception as e:
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "content": f"Error: {str(e)}",
-                    })
+                result_msg = await self._execute_tool_call(tc, tool_handlers, mcp_executor)
+                tool_results.append(result_msg)
             
-            # Yield tool results event
+            # Yield tool results event so caller can track progress
             yield {
                 "type": "tool_result",
                 "provider": provider,

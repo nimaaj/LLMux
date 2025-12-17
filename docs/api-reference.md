@@ -503,14 +503,67 @@ print(response["tool_history"])  # [{tool, arguments, result}, ...]
 
 ## MCP (Model Context Protocol)
 
+MCP (Model Context Protocol) enables LLMs to interact with external tools and resources through a standardized protocol. LLMux provides a complete MCP client implementation.
+
+### MCP Type Definitions
+
+#### `TransportType`
+
+Supported transport protocols for MCP connections:
+
+```python
+TransportType = Literal["stdio", "sse", "streamable-http", "websocket"]
+```
+
+| Transport | Description | Use Case |
+|-----------|-------------|----------|
+| `stdio` | Subprocess communication | Local MCP servers (npx, python, etc.) |
+| `sse` | Server-Sent Events over HTTP | Remote servers with SSE support |
+| `streamable-http` | Streamable HTTP transport | HTTP-based MCP servers |
+| `websocket` | WebSocket transport | Real-time bidirectional servers |
+
+#### `MCPServerConfig`
+
+Configuration dictionary for MCP server connections:
+
+```python
+class MCPServerConfig(TypedDict, total=False):
+    name: str                    # Required: Unique connection name
+    transport: TransportType     # Transport type (default: "stdio")
+    # For stdio transport
+    command: str                 # Command to run (e.g., "npx", "python")
+    args: List[str]              # Command arguments
+    env: Dict[str, str]          # Environment variables
+    # For HTTP-based transports
+    url: str                     # Server URL
+    headers: Dict[str, str]      # HTTP headers (e.g., for authentication)
+```
+
+#### `MCPConnection`
+
+Represents an active MCP server connection:
+
+```python
+@dataclass
+class MCPConnection:
+    name: str                           # Connection identifier
+    session: ClientSession              # MCP client session
+    tools: List[Dict[str, Any]]         # Discovered tools (OpenAI format)
+    resources: List[Dict[str, Any]]     # Discovered resources
+```
+
+---
+
 ### MCPToolExecutor
 
-Manages connections to MCP servers and executes their tools.
+The main class for managing MCP server connections and tool execution.
+
+**IMPORTANT**: `MCPToolExecutor` must be used as an async context manager to ensure proper cleanup of connections.
 
 ```python
 from mcp_client import MCPToolExecutor, mcp_executor
 
-# Using context manager (recommended)
+# Method 1: Using the mcp_executor() helper (recommended)
 async with mcp_executor() as executor:
     await executor.connect_stdio(
         name="filesystem",
@@ -519,78 +572,449 @@ async with mcp_executor() as executor:
     )
     tools = executor.get_tools()
     result = await executor.call_tool("list_directory", {"path": "/tmp"})
+# Connections are automatically cleaned up when exiting the context
 
-# Manual management
-executor = MCPToolExecutor()
-await executor.connect_stdio(...)
-# ... use executor ...
-await executor.disconnect_all()
+# Method 2: Using MCPToolExecutor directly
+async with MCPToolExecutor() as executor:
+    await executor.connect_stdio(...)
+    # ... use executor ...
+# Automatic cleanup on context exit
 ```
+
+---
 
 ### Connection Methods
 
 #### `connect_stdio()`
 
-Connect to an MCP server via subprocess (stdio transport).
+Connect to an MCP server via subprocess (stdio transport). Best for local MCP servers.
 
 ```python
-await executor.connect_stdio(
-    name="filesystem",       # Unique connection name
-    command="npx",           # Command to run
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    env={"KEY": "value"},    # Optional environment variables
-)
+async def connect_stdio(
+    name: str,
+    command: str,
+    args: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> MCPConnection
 ```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `str` | Yes | Unique identifier for this connection |
+| `command` | `str` | Yes | Command to run (e.g., `"npx"`, `"python"`, `"uv"`) |
+| `args` | `List[str]` | No | Command arguments |
+| `env` | `Dict[str, str]` | No | Environment variables to set |
+
+**Returns:** `MCPConnection` object with active session and discovered tools.
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    # Connect to filesystem server
+    conn = await executor.connect_stdio(
+        name="filesystem",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp", "/home"],
+        env={"NODE_ENV": "production"}
+    )
+    print(f"Connected! Found {len(conn.tools)} tools")
+```
+
+---
 
 #### `connect_sse()`
 
-Connect to an MCP server via HTTP/SSE.
+Connect to an MCP server via Server-Sent Events (SSE) transport. Best for remote HTTP servers.
 
 ```python
-await executor.connect_sse(
-    name="remote",
-    url="http://localhost:8000/mcp",
-    headers={"Authorization": "Bearer token"},
-)
+async def connect_sse(
+    name: str,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+) -> MCPConnection
 ```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `str` | Yes | Unique identifier for this connection |
+| `url` | `str` | Yes | Server URL (e.g., `"http://localhost:8000/mcp"`) |
+| `headers` | `Dict[str, str]` | No | HTTP headers for authentication |
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    conn = await executor.connect_sse(
+        name="remote-api",
+        url="https://api.example.com/mcp",
+        headers={"Authorization": "Bearer your-token-here"}
+    )
+```
+
+---
 
 #### `connect_http()`
 
-Connect to an MCP server via streamable HTTP.
+Connect to an MCP server via streamable HTTP transport.
 
 ```python
-await executor.connect_http(
-    name="api",
-    url="http://localhost:8000/mcp",
-)
+async def connect_http(
+    name: str,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+) -> MCPConnection
 ```
 
-#### `connect()` (Generic)
+**Parameters:**
 
-Connect using a configuration dictionary.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | `str` | Yes | Unique identifier for this connection |
+| `url` | `str` | Yes | Server URL |
+| `headers` | `Dict[str, str]` | No | HTTP headers |
+
+**Example:**
 
 ```python
-await executor.connect({
-    "name": "filesystem",
-    "transport": "stdio",  # "stdio", "sse", or "streamable-http"
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-})
+async with mcp_executor() as executor:
+    conn = await executor.connect_http(
+        name="http-server",
+        url="http://localhost:8080/mcp",
+    )
 ```
 
-### MCPToolExecutor Properties and Methods
+---
+
+#### `connect()`
+
+Generic connection method using a configuration dictionary. Useful for dynamic configuration.
+
+```python
+async def connect(config: MCPServerConfig) -> MCPConnection
+```
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    # Connect using config dict
+    conn = await executor.connect({
+        "name": "filesystem",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    })
+    
+    # Connect to multiple servers from config
+    configs = [
+        {"name": "fs", "transport": "stdio", "command": "npx", "args": [...]},
+        {"name": "api", "transport": "sse", "url": "http://localhost:8000/mcp"},
+    ]
+    for config in configs:
+        await executor.connect(config)
+```
+
+---
+
+### Tool Discovery Methods
+
+#### `get_tools()`
+
+Get all available tools from all connected servers in OpenAI-compatible format.
+
+```python
+def get_tools() -> List[Dict[str, Any]]
+```
+
+**Returns:** List of tool definitions compatible with `UnifiedChatClient`.
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+    
+    tools = executor.get_tools()
+    for tool in tools:
+        print(f"- {tool['function']['name']}: {tool['function']['description']}")
+```
+
+---
+
+#### `get_tools_for_server()`
+
+Get tools for a specific connected server.
+
+```python
+def get_tools_for_server(server_name: str) -> List[Dict[str, Any]]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `server_name` | `str` | Yes | Name of the server connection |
+
+**Returns:** List of tools for that server, or empty list if server not found.
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", [...])
+    await executor.connect_stdio("memory", "npx", [...])
+    
+    # Get tools only from filesystem server
+    fs_tools = executor.get_tools_for_server("fs")
+```
+
+---
+
+### Properties
+
+#### `tool_names`
+
+List of all available tool names across all connected servers.
+
+```python
+@property
+def tool_names() -> List[str]
+```
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", [...])
+    
+    print(executor.tool_names)
+    # ['read_file', 'write_file', 'list_directory', ...]
+```
+
+---
+
+#### `connections`
+
+Dictionary of all active connections, keyed by connection name.
+
+```python
+@property
+def connections() -> Dict[str, MCPConnection]
+```
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", [...])
+    await executor.connect_stdio("memory", "npx", [...])
+    
+    for name, conn in executor.connections.items():
+        print(f"{name}: {len(conn.tools)} tools")
+```
+
+---
+
+### Tool Execution Methods
+
+#### `call_tool()`
+
+Execute a single tool on the appropriate MCP server.
+
+```python
+async def call_tool(
+    tool_name: str,
+    arguments: Dict[str, Any],
+) -> str
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tool_name` | `str` | Yes | Name of the tool to execute |
+| `arguments` | `Dict[str, Any]` | Yes | Tool arguments |
+
+**Returns:** Tool result as a string.
+
+**Raises:** `ValueError` if tool is not found.
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+    
+    # Call a tool directly
+    result = await executor.call_tool(
+        "list_directory",
+        {"path": "/tmp"}
+    )
+    print(result)
+```
+
+---
+
+#### `execute_tool_calls()`
+
+Execute multiple tool calls from an LLM response and return formatted results.
+
+```python
+async def execute_tool_calls(
+    tool_calls: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tool_calls` | `List[Dict]` | Yes | List of tool calls from LLM response |
+
+**Returns:** List of tool result messages ready to send back to the LLM.
+
+**Example:**
+
+```python
+# Tool calls from LLM response
+tool_calls = [
+    {"id": "call_1", "name": "list_directory", "arguments": {"path": "/tmp"}},
+    {"id": "call_2", "name": "read_file", "arguments": {"path": "/tmp/test.txt"}},
+]
+
+# Execute all tool calls
+results = await executor.execute_tool_calls(tool_calls)
+# Returns:
+# [
+#     {"role": "tool", "tool_call_id": "call_1", "content": "..."},
+#     {"role": "tool", "tool_call_id": "call_2", "content": "..."},
+# ]
+```
+
+---
+
+### Resource Methods
+
+MCP servers can expose resources (files, data, etc.) in addition to tools.
+
+#### `list_resources()`
+
+List available resources from connected MCP servers.
+
+```python
+async def list_resources(
+    server_name: Optional[str] = None
+) -> List[Dict[str, Any]]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `server_name` | `str` | No | Filter by server name (all servers if None) |
+
+**Returns:** List of resource definitions with `uri`, `name`, and `server` fields.
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", [...])
+    
+    # List all resources
+    resources = await executor.list_resources()
+    for r in resources:
+        print(f"{r['name']}: {r['uri']} (from {r['server']})")
+    
+    # List resources from specific server
+    fs_resources = await executor.list_resources("fs")
+```
+
+---
+
+#### `read_resource()`
+
+Read content from an MCP resource.
+
+```python
+async def read_resource(
+    uri: str,
+    server_name: Optional[str] = None
+) -> str
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `uri` | `str` | Yes | Resource URI |
+| `server_name` | `str` | No | Server to read from (auto-detect if None) |
+
+**Returns:** Resource content as a string.
+
+**Raises:** `ValueError` if resource not found.
+
+**Example:**
+
+```python
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", [...])
+    
+    # Read a resource
+    content = await executor.read_resource("file:///tmp/config.json")
+    print(content)
+```
+
+---
+
+### Helper Functions
+
+#### `mcp_executor()`
+
+Async context manager for easy MCPToolExecutor usage with automatic cleanup.
+
+```python
+@asynccontextmanager
+async def mcp_executor() -> AsyncIterator[MCPToolExecutor]
+```
+
+**Example:**
+
+```python
+from mcp_client import mcp_executor
+
+async with mcp_executor() as executor:
+    await executor.connect_stdio("fs", "npx", [...])
+    tools = executor.get_tools()
+    result = await executor.call_tool("read_file", {"path": "/tmp/test.txt"})
+# All connections automatically cleaned up
+```
+
+---
+
+### MCPToolExecutor Quick Reference
 
 | Method/Property | Description |
 |----------------|-------------|
-| `get_tools()` | Get all tools in OpenAI format |
-| `tool_names` | List of available tool names |
+| `connect_stdio(name, command, args, env)` | Connect via subprocess |
+| `connect_sse(name, url, headers)` | Connect via SSE |
+| `connect_http(name, url, headers)` | Connect via HTTP |
+| `connect(config)` | Connect using config dict |
+| `get_tools()` | Get all tools (OpenAI format) |
+| `get_tools_for_server(name)` | Get tools for specific server |
+| `tool_names` | List of all tool names |
 | `connections` | Dict of active connections |
-| `call_tool(name, args)` | Execute a tool |
+| `call_tool(name, args)` | Execute a single tool |
 | `execute_tool_calls(calls)` | Execute multiple tool calls |
-| `disconnect(name)` | Disconnect from a server |
-| `disconnect_all()` | Disconnect from all servers |
-| `list_resources()` | List available resources |
-| `read_resource(uri)` | Read a resource |
+| `list_resources(server_name)` | List available resources |
+| `read_resource(uri, server_name)` | Read a resource |
+
+---
 
 ### Using MCP with chat_with_tools()
 
