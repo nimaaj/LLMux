@@ -61,6 +61,38 @@ async def main():
 asyncio.run(main())
 ```
 
+## Model Discovery
+
+Fetch available models from different providers:
+
+```python
+import asyncio
+from llmclient import UnifiedChatClient
+
+async def list_available_models():
+    client = UnifiedChatClient()
+    
+    # List Gemini models
+    print("Gemini Models:")
+    try:
+        models = await client.list_models("gemini")
+        for m in models[:5]: # Print first 5
+            print(f"- {m}")
+    except Exception as e:
+        print(f"Error fetching Gemini models: {e}")
+
+    # List OpenAI models
+    print("\nOpenAI Models:")
+    try:
+        models = await client.list_models("openai")
+        for m in models[:5]:
+            print(f"- {m}")
+    except Exception as e:
+        print(f"Error fetching OpenAI models: {e}")
+
+asyncio.run(list_available_models())
+```
+
 ## Vision / Multimodal
 
 Send images to vision-capable models. The same message format works across all providers.

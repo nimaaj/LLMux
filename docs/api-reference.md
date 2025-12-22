@@ -30,6 +30,30 @@ By default, API keys are loaded from the `.env` file.
 | `gemini` | `gemini-1.5-pro`, `gemini-1.5-flash` |
 | `deepseek` | `deepseek-chat`, `deepseek-reasoner` |
 
+### `list_models()`
+
+Get a list of available models for a configured provider.
+
+```python
+async def list_models(provider: str) -> List[str]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | `str` | Yes | `"openai"`, `"claude"`, `"gemini"`, or `"deepseek"` |
+
+**Returns:**
+List of model name strings.
+
+**Example:**
+```python
+models = await client.list_models("gemini")
+print(models)
+# ['gemini-1.5-flash-latest', 'gemini-1.5-pro-latest', ...]
+```
+
 ---
 
 ## `chat()` - Non-Streaming

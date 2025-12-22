@@ -1,9 +1,30 @@
+import asyncio
+import dotenv
 from llmclient import UnifiedChatClient
 from rich import print
-import dotenv
-dotenv.load_dotenv()
-client = UnifiedChatClient()
-print([client.get_models("gemini"),      # Returns Gemini models
-client.get_models("openai"),      # Returns OpenAI models
-client.get_models("deepseek") ,   # Returns DeepSeek models
-client.get_models("anthropic") ])  # Returns Anthropic models
+
+async def main():
+    dotenv.load_dotenv()
+    client = UnifiedChatClient()
+    
+    print("Fetching models...")
+    
+    providers = ["gemini", "openai", "deepseek", "anthropic", "huggingface"]
+    results = {}
+    
+    for provider in providers:
+        try:
+            print(f"Querying {provider}...")
+            # We use the new async instance method list_models
+            # It handles aliases (anthropic -> claude)
+            models = await client.list_models(provider)
+            results[provider] = models
+        except ValueError as e:
+            results[provider] = f"Error: {e}"
+        except Exception as e:
+            results[provider] = f"Error: {e}"
+
+    print(results)
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -8,6 +8,7 @@ A unified Python client for interacting with multiple LLM providers (OpenAI, Ant
 - **Streaming & Non-Streaming** - Both real-time streaming and traditional request/response
 - **Beautiful Output** - Rich terminal formatting with Markdown rendering
 - **Normalized Metrics** - Consistent token usage and latency stats across providers
+- **Model Discovery** - Dynamically fetch available models from providers
 
 ## 📦 Installation
 
