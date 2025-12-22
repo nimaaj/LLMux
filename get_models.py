@@ -1,6 +1,6 @@
 import asyncio
 import dotenv
-from llmclient import UnifiedChatClient
+from llmux import UnifiedChatClient
 from rich import print
 
 async def main():

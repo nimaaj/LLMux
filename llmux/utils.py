@@ -16,7 +16,21 @@ from .types import (
 
 def encode_image_file(image_path: Union[str, Path]) -> Tuple[str, str]:
     """
-    Encode a local image file to base64.
+    Encode a local image file to base64 for LLM usage.
+
+    Reads the file from the given path, determines its MIME type based on extension,
+    and returns a tuple of the base64-encoded data and the MIME type.
+
+    Args:
+        image_path (Union[str, Path]): Absolute path to the image file.
+
+    Returns:
+        Tuple[str, str]: A tuple containing:
+            - b64_data (str): The base64-encoded string of the image content.
+            - mime_type (str): The MIME type (e.g., 'image/png').
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
     """
     path = Path(image_path)
     if not path.exists():
@@ -42,7 +56,21 @@ def encode_image_file(image_path: Union[str, Path]) -> Tuple[str, str]:
 
 async def encode_image_url(url: str) -> Tuple[str, str]:
     """
-    Download an image from a URL and encode it to base64.
+    Fetch an image from a URL and encode it to base64.
+
+    This function downloads the image content using an async HTTP client,
+    extracts the MIME type from the response headers, and encodes the content.
+
+    Args:
+        url (str): The publicly accessible URL of the image.
+
+    Returns:
+        Tuple[str, str]: A tuple containing:
+            - b64_data (str): The base64-encoded string of the downloaded content.
+            - mime_type (str): The MIME type from the Content-Type header.
+
+    Raises:
+        httpx.HTTPError: If the download fails (timeout, 404, etc.).
     """
     # Use a browser-like User-Agent to avoid being blocked
     headers = {
@@ -65,7 +93,15 @@ async def encode_image_url(url: str) -> Tuple[str, str]:
 
 async def resolve_image_to_base64(url: str) -> Tuple[str, str]:
     """
-    Resolve an image URL (HTTP or data URI) to base64 data and mime type.
+    Resolve an arbitrary image reference (URL or data URI) to base64 data.
+
+    This is a helper to handle both remote URLs and inline data URIs uniformly.
+
+    Args:
+        url (str): HTTP/HTTPS URL or Data URI (data:image/...).
+
+    Returns:
+        Tuple[str, str]: A tuple containing (base64_data, mime_type).
     """
     if url.startswith("data:"):
         # Parse data URI: data:[<mediatype>][;base64],<data>
@@ -84,7 +120,26 @@ def create_image_content(
     detail: Optional[Literal["auto", "low", "high"]] = None,
 ) -> ImageContent:
     """
-    Create an image content part from various sources.
+    Create a standardized image content part for multimodal messages.
+
+    This helper accepts various image sources and formats them into the
+    expected structure for the Unified Chat Client.
+
+    Args:
+        source (str): Can be:
+            - A local file path (e.g., "/path/to/image.png")
+            - A remote URL (e.g., "https://example.com/image.jpg")
+            - A data URI (e.g., "data:image/png;base64,...")
+            - Raw base64 data (requires `mime_type` kwarg)
+        mime_type (str, optional): Required if `source` is raw base64 data.
+                                   Example: "image/png".
+        detail (str, optional): Detail level for OpenAI vision ('auto', 'low', 'high').
+
+    Returns:
+        ImageContent: A dictionary adhering to the internal ImageContent type.
+
+    Raises:
+        ValueError: If the source type cannot be determined or requires explicit mime_type.
     """
     # Already a data URI - use as-is
     if source.startswith("data:"):
@@ -115,7 +170,13 @@ def create_image_content(
 
 def create_text_content(text: str) -> TextContent:
     """
-    Create a text content part for multimodal messages.
+    Create a standardized simple text content part.
+
+    Args:
+        text (str): The text message content.
+
+    Returns:
+        TextContent: A dictionary {"type": "text", "text": text}.
     """
     return {"type": "text", "text": text}
 
@@ -125,7 +186,17 @@ def create_message(
     content: Union[str, List[Union[str, ContentPart]]],
 ) -> Message:
     """
-    Create a message with text and/or images.
+    Create a standardized Message object.
+
+    Handles both simple string content and lists of content parts (multimodal).
+    Automatically normalizes string elements within a list to TextContent objects.
+
+    Args:
+        role (str): The role of the message sender ('system', 'user', 'assistant').
+        content (Union[str, List]): The content of the message.
+
+    Returns:
+        Message: A dictionary matching the Message type definition.
     """
     # Simple text content - no transformation needed
     if isinstance(content, str):
@@ -153,7 +224,19 @@ def create_tool(
     required: Optional[List[str]] = None,
 ) -> Tool:
     """
-    Create a tool definition for function calling.
+    Create a standardized Tool definition for function calling.
+
+    Formats the tool definition according to the OpenAI function calling schema,
+    which is widely adopted by other providers.
+
+    Args:
+        name (str): The name of the function/tool to be called.
+        description (str): A clear description of what the tool does.
+        parameters (Dict): A JSON Schema dictionary defining the expected arguments.
+        required (List[str], optional): A list of parameter names that are required.
+
+    Returns:
+        Tool: A dictionary representing the tool definition.
     """
     return {
         "type": "function",
@@ -172,6 +255,16 @@ def create_tool(
 def create_tool_result(tool_call_id: str, content: str) -> Message:
     """
     Create a tool result message to send back to the LLM.
+
+    This message marks the completion of a tool execution and provides
+    the output to the model.
+
+    Args:
+        tool_call_id (str): The ID of the tool call this result corresponds to.
+        content (str): The stringified result of the tool execution.
+
+    Returns:
+        Message: A message dictionary with role='tool'.
     """
     return {
         "role": "tool",
@@ -185,7 +278,16 @@ def create_assistant_message_with_tool_calls(
     tool_calls: List[ToolCall],
 ) -> Message:
     """
-    Create an assistant message with tool calls for conversation history.
+    Create an assistant message that includes tool calls.
+
+    This represents a model's request to execute one or more tools.
+
+    Args:
+        content (str): Optional text content accompanying the tool calls (can be empty).
+        tool_calls (List[ToolCall]): List of tool call objects.
+
+    Returns:
+        Message: A message dictionary with role='assistant'.
     """
     return {
         "role": "assistant",

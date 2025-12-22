@@ -30,7 +30,21 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Send a chat request.
+        Send a chat request using the OpenAI-compatible API.
+
+        Handles:
+        - Message conversion to OpenAI format.
+        - Option mapping (temperature, max_tokens, etc.).
+        - Tool call parsing.
+        - Token usage normalization.
+
+        Args:
+            model (str): The model identifier.
+            messages (List[Message]): List of conversation messages.
+            **kwargs: Additional parameters (e.g., temperature, top_p, tools).
+
+        Returns:
+            Dict[str, Any]: Standardized response dictionary containing 'text', 'tool_calls', and 'meta'.
         """
         if not self.client:
             raise RuntimeError(f"{self.provider_name.title()} client not configured")
@@ -109,7 +123,19 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Stream a chat response.
+        Stream a chat response using the OpenAI-compatible API.
+
+        Yields events for tokens, errors, and completion.
+
+        Args:
+            model (str): The model identifier.
+            messages (List[Message]): List of conversation messages.
+            **kwargs: Additional parameters.
+
+        Yields:
+            Dict[str, Any]: Stream events:
+                - {'type': 'token', 'text': '...', 'provider': '...'}
+                - {'type': 'done', 'text': '...', 'meta': {...}}
         """
         if not self.client:
             raise RuntimeError(f"{self.provider_name.title()} client not configured")
@@ -200,10 +226,16 @@ class OpenAIProvider(BaseLLMProvider):
         
         Handles:
         - Role mapping (system, user, assistant, tool)
-        - Tool call results
-        - Assistant messages with tool calls
+        - Tool call results (formatted as separate messages)
+        - Assistant messages with tool calls (preserving tool_calls field)
         - Multimodal content (text + images)
         - Image URL handling (converts HTTP URLs to base64 if needed for stability)
+
+        Args:
+            messages (List[Message]): Internal message list.
+
+        Returns:
+            List[Dict]: OpenAI-compatible message list.
         """
         converted = []
         for msg in messages:
@@ -274,7 +306,15 @@ class OpenAIProvider(BaseLLMProvider):
     @staticmethod
     def _parse_tool_calls(choice) -> List[ToolCall]:
         """
-        Parse tool calls from OpenAI response.
+        Parse tool calls from OpenAI response choice.
+
+        Safe handling of JSON parsing for tool arguments.
+
+        Args:
+            choice: The OpenAI API response choice object.
+
+        Returns:
+            List[ToolCall]: List of parsed tool calls.
         """
         tool_calls = []
         if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
@@ -292,7 +332,10 @@ class OpenAIProvider(BaseLLMProvider):
 
     async def get_models(self) -> List[str]:
         """
-        Get list of available models.
+        Get list of available models from the provider API.
+
+        Returns:
+            List[str]: List of model names/ids. Returns empty list if client not configured or API fails.
         """
         if not self.client:
             return []

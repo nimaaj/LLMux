@@ -23,6 +23,22 @@ class AnthropicProvider(BaseLLMProvider):
         messages: List[Message],
         **kwargs
     ) -> Dict[str, Any]:
+        """
+        Send a chat request to the Claude API.
+
+        Handles:
+        - System prompt extraction (sent as separate parameter).
+        - Message conversion (text/image handling).
+        - Tool call parsing.
+        
+        Args:
+            model (str): The specific Claude model identifier.
+            messages (List[Message]): Conversation history.
+            **kwargs: Options like max_tokens, temperature, tools, etc.
+
+        Returns:
+            Dict[str, Any]: Standardized response dictionary.
+        """
         if not self.client:
             raise RuntimeError("Claude (Anthropic) client not configured")
 
@@ -110,6 +126,19 @@ class AnthropicProvider(BaseLLMProvider):
         messages: List[Message],
         **kwargs
     ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Stream a chat response from Claude.
+
+        Yields events for tokens, errors, and completion.
+
+        Args:
+            model (str): Model identifier.
+            messages (List[Message]): Conversation history.
+            **kwargs: Additional parameters.
+
+        Yields:
+            Dict[str, Any]: Stream events.
+        """
         if not self.client:
             raise RuntimeError("Claude (Anthropic) client not configured")
 
@@ -187,7 +216,12 @@ class AnthropicProvider(BaseLLMProvider):
         
         Anthropic's API differs from OpenAI's in that 'system' messages are passed
         as a separate top-level parameter, not within the `messages` list.
-        
+        It also requires converting image URLs to base64 data as it doesn't support
+        fetching images via public URLs in the same way.
+
+        Args:
+            messages (List[Message]): Internal message list.
+
         Returns:
             Tuple containing:
             - system_text: Extracted system prompt string (or None)
@@ -245,6 +279,8 @@ class AnthropicProvider(BaseLLMProvider):
     def _convert_tools(tools: List[Tool]) -> List[Dict[str, Any]]:
         """
         Convert OpenAI-format tools to Claude format.
+        
+        Claude uses 'input_schema' instead of 'parameters'.
         """
         claude_tools = []
         for tool in tools:
@@ -260,6 +296,14 @@ class AnthropicProvider(BaseLLMProvider):
     def _parse_tool_calls(response) -> List[ToolCall]:
         """
         Parse tool calls from Claude response.
+
+        Extracts tool use blocks from the response content.
+
+        Args:
+            response: The Claude API response object.
+
+        Returns:
+            List[ToolCall]: List of parsed tool calls.
         """
         tool_calls = []
         for block in response.content:
@@ -273,7 +317,10 @@ class AnthropicProvider(BaseLLMProvider):
 
     async def get_models(self) -> List[str]:
         """
-        Get list of available models.
+        Get list of available models from Anthropic API.
+
+        Returns:
+            List[str]: List of model identifiers.
         """
         if not self.client:
             return []

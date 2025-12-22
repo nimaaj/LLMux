@@ -148,9 +148,21 @@ class UnifiedChatClient:
 
     async def list_models(self, provider: str) -> List[str]:
         """
-        Get list of available models for a configured provider.
-        
-        This uses the configured credentials in the client instance.
+        Get the list of available models for a specific provider.
+
+        This method delegates the request to the underlying provider implementation,
+        fetching the currently available models using the credentials configured
+        for this client instance.
+
+        Args:
+            provider (str): The name of the provider (e.g., 'openai', 'claude', 'gemini').
+                           Aliases like 'anthropic' -> 'claude' are automatically handled.
+
+        Returns:
+            List[str]: A list of model identifiers available for the provider.
+
+        Raises:
+            ValueError: If the provider is not configured or not supported.
         """
         # Normalize provider names
         provider = provider.lower()
@@ -172,7 +184,37 @@ class UnifiedChatClient:
         **opts,
     ) -> Dict[str, Any]:
         """
-        Send a chat request to the specified provider.
+        Send a non-streaming chat request to the specified provider.
+
+        This method handles connecting to the provider, converting messages to the
+        provider's native format (including handling multimodal content like images),
+        and returning a standardized response.
+
+        Args:
+            provider (str): The provider name (e.g., 'openai', 'claude', 'gemini', 'deepseek').
+            model (str): The specific model identifier to use (e.g., 'gpt-4o', 'claude-3-5-sonnet').
+            messages (List[Message]): A list of message dictionaries. 
+                                     Each message should have 'role' ('system', 'user', 'assistant')
+                                     and 'content' (str or list of content parts).
+            **opts: Additional provider-specific options (passed to the underlying API).
+                   Common options:
+                   - temperature (float): Controls randomness (0.0 to 1.0).
+                   - max_tokens (int): Maximum number of tokens to generate.
+                   - top_p (float): Nucleus sampling parameter.
+
+        Returns:
+            Dict[str, Any]: A standardized response dictionary containing:
+                - text (str): The generated text response.
+                - provider (str): The provider name.
+                - meta (dict): Metadata including:
+                    - model (str): The model used.
+                    - usage (dict): Token usage statistics (input_tokens, output_tokens, total_tokens).
+                    - latency_ms (float): Request latency in milliseconds.
+                - tool_calls (list, optional): List of tool calls if valid tools were requested/used.
+
+        Raises:
+            ValueError: If the provider is not configured or supported.
+            Exception: Any provider-specific API errors.
         """
         if provider not in self.providers:
             # Try to handle case where user requests a provider that wasn't configured
@@ -188,7 +230,34 @@ class UnifiedChatClient:
         **opts,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Stream response from the specified provider.
+        Stream response from the specified provider in real-time.
+
+        This method yields events as they are received from the provider.
+        It standardizes the event format across all providers.
+
+        Args:
+            provider (str): The provider name (e.g., 'openai', 'claude').
+            model (str): The model identifier.
+            messages (List[Message]): List of conversation messages.
+            **opts: Additional options (temperature, max_tokens, etc.).
+
+        Yields:
+            Dict[str, Any]: An event dictionary. Common event types:
+                - type='token': Contains a chunk of generated text in the 'text' field.
+                  Example: {"type": "token", "text": "Hello", "provider": "openai"}
+                
+                - type='error': Indicates an error occurred during streaming.
+                  Example: {"type": "error", "error": "Rate limit exceeded"}
+                
+                - type='done': Sent when streaming is complete. Includes final aggregation.
+                  Example: {
+                      "type": "done", 
+                      "text": "Full text...", 
+                      "meta": {"usage": {...}} 
+                  }
+
+        Raises:
+            ValueError: If the provider is not known.
         """
         if provider not in self.providers:
             raise ValueError(f"Provider '{provider}' not configured or not supported.")
@@ -209,7 +278,37 @@ class UnifiedChatClient:
         **opts
     ) -> Dict[str, Any]:
         """
-        Chat with automatic tool execution loop.
+        Chat with a model while enabling automatic (or manual) tool execution loops.
+
+        This method facilitates the "agentic" potential of LLMs by:
+        1. Supplying a list of tools (definitions) to the model.
+        2. Sending the user's message.
+        3. If the model requests a tool call, executing that tool (if auto_execute=True).
+        4. Feeding the tool's result back to the model.
+        5. Repeating steps 3-4 until the model produces a final text response or max_iterations is reached.
+
+        Tools can be native Python functions (via `tools` + `tool_handlers`) or
+        Model Context Protocol (MCP) tools (via `mcp_executor`).
+
+        Args:
+            provider (str): LLM provider name.
+            model (str): Model identifier.
+            messages (List[Message]): Conversation history.
+            tools (List[Tool], optional): List of tool definitions in OpenAI format.
+                                         Use `client.create_tool()` to generate these.
+            mcp_executor (MCPToolExecutor, optional): Executor for MCP tools. If provided,
+                                                     tools from connected MCP servers are auto-included.
+            tool_handlers (Dict[str, Callable], optional): Mapping of tool names to Python functions.
+                                                          Required for executing "native" calls.
+            auto_execute (bool): If True, automatically executes tool calls and loops. 
+                                 If False, returns after the first model response (which may contain tool requests).
+                                 Defaults to True.
+            max_iterations (int): Safety limit for the tool execution loop. Defaults to 10.
+            **opts: Additional parameters passed to `chat()`.
+
+        Returns:
+            Dict[str, Any]: The final response from the model (after all tool execution loops).
+                            If tools were executed, includes a "tool_history" key detailing the calls.
         """
         current_messages = list(messages)
         tool_handlers = tool_handlers or {}
@@ -277,7 +376,19 @@ class UnifiedChatClient:
         mcp_executor: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
-        Execute a single tool call and return the result message.
+        Internal method to execute a single tool call.
+
+        It attempts to find a handler in `tool_handlers` first (native tools),
+        then checks `mcp_executor` (MCP tools).
+
+        Args:
+            tool_call (Dict[str, Any]): The tool call object (name, arguments, id).
+            tool_handlers (Dict[str, Callable]): Native tool handler implementation map.
+            mcp_executor (MCPToolExecutor, optional): MCP executor instance.
+
+        Returns:
+            Dict[str, Any]: A message dictionary representing the tool result.
+                            Role is always 'tool'.
         """
         tool_name = tool_call.get("name", "")
         arguments = tool_call.get("arguments", {})

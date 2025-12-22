@@ -31,9 +31,7 @@ from rich.table import Table
 from rich import inspect
 
 # Local imports
-from llmclient import UnifiedChatClient, Message
-from rich_llm_printer import RichPrinter, RichStreamPrinter
-from mcp_client import mcp_executor
+from llmux import UnifiedChatClient, Message, RichPrinter, RichStreamPrinter, mcp_executor
 
 # Initialize global console
 console = Console()
@@ -79,6 +77,7 @@ async def demo_basic_stream():
 async def demo_interactive_conversation():
     """Demo interactive conversation with streaming."""
     console.print("[bold cyan]\n=== Interactive Conversation ===")
+    console.print("\n type exit to return to main menu")
     
     client = UnifiedChatClient()
     printer = RichStreamPrinter(
@@ -639,7 +638,57 @@ async def demo_manual_execution():
 
 
 # =============================================================================
-# PART 5: MAIN MENU RUNNER
+# PART 5: UTILITIES
+# =============================================================================
+
+async def demo_list_models():
+    """List available models for configured providers."""
+    from rich.columns import Columns
+    from rich.text import Text
+    
+    console.print(Panel("Utilities: List Available Models", style="cyan"))
+    
+    client = UnifiedChatClient()
+    providers = ["gemini", "openai", "deepseek", "anthropic", "huggingface"]
+    
+    with console.status("[bold green]Fetching models...[/bold green]"):
+        results = {}
+        for provider in providers:
+            try:
+                models = await client.list_models(provider)
+                results[provider] = models
+            except Exception as e:
+                # Don't fail completely if one provider is missing/fails
+                results[provider] = f"Error: {str(e)}"
+
+    for provider, data in results.items():
+        if isinstance(data, list) and data:
+            # Sort models for better readability
+            data.sort()
+            
+            # Create a simple list of Text objects for Columns
+            items = [Text(m, style="green") for m in data]
+            
+            console.print(Panel(
+                Columns(items, equal=True, expand=True), 
+                title=f"[bold]{provider.title()}[/bold] ({len(data)} models)",
+                border_style="green"
+            ))
+        elif isinstance(data, list) and not data:
+             console.print(Panel(
+                "[yellow]No models found (empty list returned).[/yellow]", 
+                title=f"[bold]{provider.title()}[/bold]",
+                border_style="yellow"
+            ))
+        else:
+            console.print(Panel(
+                f"[red]{data}[/red]", 
+                title=f"[bold]{provider.title()}[/bold] (Error/Not Configured)",
+                border_style="red"
+            ))
+
+# =============================================================================
+# PART 6: MAIN MENU RUNNER
 # =============================================================================
 
 async def run_menu():
@@ -687,6 +736,9 @@ async def run_menu():
                 ("3", "MCP with LLM", demo_mcp_with_llm),
                 ("4", "Combined Tools", demo_combined_tools),
                 ("5", "Multi-Server", demo_multi_server),
+            ]),
+            "5": ("Utilities", [
+                ("1", "List Models", demo_list_models),
             ]),
             "0": ("Exit", None)
         }

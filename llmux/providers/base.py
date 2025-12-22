@@ -20,6 +20,14 @@ class BaseLLMProvider(ABC):
     ) -> Dict[str, Any]:
         """
         Send a chat request to the provider.
+
+        Args:
+            model (str): The model identifier.
+            messages (List[Message]): List of conversation messages.
+            **kwargs: Additional provider-specific options.
+
+        Returns:
+            Dict[str, Any]: Standardized response dictionary.
         """
         pass
 
@@ -31,6 +39,14 @@ class BaseLLMProvider(ABC):
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Stream a chat response from the provider.
+
+        Args:
+            model (str): The model identifier.
+            messages (List[Message]): List of conversation messages.
+            **kwargs: Additional provider-specific options.
+
+        Yields:
+            Dict[str, Any]: Stream events (tokens, errors, done).
         """
         pass
 
@@ -38,6 +54,9 @@ class BaseLLMProvider(ABC):
     async def get_models(self) -> List[str]:
         """
         Get list of available models from the provider.
+
+        Returns:
+            List[str]: List of model identifiers.
         """
         pass
 
@@ -52,6 +71,19 @@ class BaseLLMProvider(ABC):
     ) -> Dict[str, Any]:
         """
         Normalize token usage information across providers.
+
+        Creates a standardized dictionary structure for token usage statistics,
+        optionally calculating totals if missing.
+
+        Args:
+            provider (str): Name of the provider.
+            input_tokens (int, optional): Number of prompt tokens.
+            output_tokens (int, optional): Number of generated tokens.
+            total_tokens (int, optional): Total token count.
+            raw (dict, optional): Raw usage data from the provider response.
+
+        Returns:
+            Dict[str, Any]: Standardized usage dictionary.
         """
         # Calculate total if not provided
         if total_tokens is None and input_tokens is not None and output_tokens is not None:

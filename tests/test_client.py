@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from llmclient.client import UnifiedChatClient
+from llmux.client import UnifiedChatClient
 
 class TestUnifiedChatClient:
     

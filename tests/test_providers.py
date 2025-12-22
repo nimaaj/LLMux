@@ -1,12 +1,12 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from llmclient.providers.openai import OpenAIProvider
-from llmclient.providers.anthropic import AnthropicProvider
-from llmclient.providers.gemini import GeminiProvider
+from llmux.providers.openai import OpenAIProvider
+from llmux.providers.anthropic import AnthropicProvider
+from llmux.providers.gemini import GeminiProvider
 
 class TestOpenAIProvider:
     @pytest.mark.asyncio
-    @patch("llmclient.providers.openai.AsyncOpenAI")
+    @patch("llmux.providers.openai.AsyncOpenAI")
     async def test_convert_messages_text(self, mock_openai_cls):
         # Setup mock
         client_mock = MagicMock()
@@ -21,7 +21,7 @@ class TestOpenAIProvider:
         assert converted[0] == {"role": "user", "content": "hello"}
 
     @pytest.mark.asyncio
-    @patch("llmclient.providers.openai.AsyncOpenAI")
+    @patch("llmux.providers.openai.AsyncOpenAI")
     async def test_chat_call(self, mock_openai_cls):
         # Setup mock
         client_mock = AsyncMock()
@@ -41,7 +41,7 @@ class TestOpenAIProvider:
 
 class TestAnthropicProvider:
     @pytest.mark.asyncio
-    @patch("llmclient.providers.anthropic.AsyncAnthropic")
+    @patch("llmux.providers.anthropic.AsyncAnthropic")
     async def test_convert_messages_split_system(self, mock_anthropic_cls):
         client_mock = MagicMock()
         mock_anthropic_cls.return_value = client_mock
@@ -62,7 +62,7 @@ class TestAnthropicProvider:
 
 class TestGeminiProvider:
     @pytest.mark.asyncio
-    @patch("llmclient.providers.gemini.genai")
+    @patch("llmux.providers.gemini.genai")
     async def test_convert_messages_roles(self, mock_genai):
         provider = GeminiProvider(api_key="fake-key")
         

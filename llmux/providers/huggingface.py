@@ -11,6 +11,9 @@ class HuggingFaceProvider(OpenAIProvider):
         api_key: Optional[str],
         base_url: str = "https://router.huggingface.co/v1/",
     ):
+        """
+        Initialize HuggingFaceProvider.
+        """
         super().__init__(
             api_key=api_key,
             base_url=base_url,
